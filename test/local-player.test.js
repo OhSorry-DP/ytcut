@@ -27,6 +27,38 @@ class Events {
   emit(name) { for (const fn of [...(this.listeners.get(name) || [])]) fn(); }
 }
 const rangesOf = owner => ({ get length() { return owner.ranges.length; }, start: i => owner.ranges[i][0], end: i => owner.ranges[i][1] });
+function unionRanges(ranges) {
+  const sorted = ranges.filter(range => Array.isArray(range) && range.length >= 2 && Number(range[1]) > Number(range[0]))
+    .map(([start, end]) => [Number(start), Number(end)]).sort((a, b) => a[0] - b[0]);
+  const result = [];
+  for (const range of sorted) {
+    const last = result.at(-1);
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+    else result.push(range);
+  }
+  return result;
+}
+function subtractRanges(ranges, start, end) {
+  const result = [];
+  for (const [a, b] of ranges) {
+    if (b <= start || a >= end) result.push([a, b]);
+    else { if (a < start) result.push([a, start]); if (b > end) result.push([end, b]); }
+  }
+  return unionRanges(result);
+}
+function intersectRanges(left, right) {
+  const result = [];
+  for (const [a, b] of unionRanges(left)) for (const [c, d] of unionRanges(right)) {
+    const start = Math.max(a, c), end = Math.min(b, d);
+    if (end > start) result.push([start, end]);
+  }
+  return unionRanges(result);
+}
+function applyWindow(ranges, sb) {
+  return ranges.map(range => [Number(range.start ?? range[0]) + sb.timestampOffset, Number(range.end ?? range[1]) + sb.timestampOffset])
+    .map(([start, end]) => [Math.max(start, sb.appendWindowStart), Math.min(end, sb.appendWindowEnd)])
+    .filter(([start, end]) => end > start);
+}
 class FakeVideo extends Events {
   _currentTime = 0; paused = true; src = ''; currentSrc = ''; sources = []; ranges = []; readyState = 0; seeking = false;
   delayedSeek = false; throwBeforeMetadata = false; assignments = []; playCalls = 0; rejectPlay = false;
@@ -49,43 +81,73 @@ function fixture(t, options = {}) {
   const oldCreate = URL.createObjectURL, oldRevoke = URL.revokeObjectURL;
   const video = new FakeVideo(), errors = [], times = [], buffering = [], sources = [], fetches = [], live = new Set(), revoked = [];
   let prepareCalls = 0, auto = options.auto !== false, supported = true;
+  const absolute = options.absolute === true, log = [], mediaAppendIndex = new Map();
   class SourceBuffer extends Events {
-    mode = ''; timestampOffset = 0; updating = false; ranges = []; buffered = rangesOf(this);
+    mode = ''; _timestampOffset = 0; updating = false; ranges = []; buffered = rangesOf(this);
+    _appendWindowStart = 0; _appendWindowEnd = Infinity;
     calls = []; attempts = []; quota = 0; operation;
+    constructor() { super(); this.id = sources.length; this.parserFragments = []; }
+    get timestampOffset() { return this._timestampOffset; }
+    set timestampOffset(value) { assert.equal(this.updating, false); log.push(['timestampOffset', value]); this._timestampOffset = value; }
+    get appendWindowStart() { return this._appendWindowStart; }
+    set appendWindowStart(value) { assert.equal(this.updating, false); log.push(['appendWindowStart', value]); this._appendWindowStart = value; }
+    get appendWindowEnd() { return this._appendWindowEnd; }
+    set appendWindowEnd(value) { assert.equal(this.updating, false); log.push(['appendWindowEnd', value]); this._appendWindowEnd = value; }
     appendBuffer(bytes) {
       assert.equal(this.updating, false); this.attempts.push(Uint8Array.from(bytes));
       if (this.quota > 0) { this.quota--; throw Object.assign(new Error('quota'), { name: 'QuotaExceededError' }); }
-      this.calls.push(['append', Uint8Array.from(bytes)]); this.updating = true; this.operation = 'append';
+      this.calls.push(['append', Uint8Array.from(bytes)]);
+      const appendCount = this.calls.filter(call => call[0] === 'append').length;
+      log.push([absolute && appendCount <= 2 ? 'init' : 'append', bytes.length]); this.updating = true; this.operation = 'append';
       if (auto) Promise.resolve().then(() => this.finish());
     }
     remove(start, end) {
-      assert.equal(this.updating, false); this.calls.push(['remove', start, end]); this.updating = true; this.operation = 'remove';
+      assert.equal(this.updating, false); this.calls.push(['remove', start, end]); log.push(['remove', start, end]); this.updating = true; this.operation = 'remove';
       if (auto) Promise.resolve().then(() => this.finish());
     }
     finish(ranges) {
       if (!this.updating) return;
       if (this.operation === 'remove') {
-        const end = this.calls.at(-1)[2]; this.ranges = this.ranges.filter(range => range[1] > end).map(([a, b]) => [Math.max(a, end), b]); video.ranges = this.ranges.map(range => [...range]);
-      } else if (ranges) { this.ranges = ranges.map(range => [...range]); video.ranges = ranges.map(range => [...range]); }
+        const [, start, end] = this.calls.at(-1); this.ranges = subtractRanges(this.ranges, start, end); video.ranges = subtractRanges(video.ranges, start, end);
+      } else if (ranges) { this.ranges = unionRanges(ranges); video.ranges = unionRanges(ranges); }
+      else if (absolute && this.operation === 'append') {
+        const count = mediaAppendIndex.get(this) || 0; mediaAppendIndex.set(this, count + 1);
+        if (count < 2) { this.parserFragments.push({ init: true, index: count }); this.updating = false; this.emit('updateend'); return; }
+        const index = count - 2;
+        const script = typeof options.mediaScript === 'function' ? options.mediaScript({ source: sources[this.id], sb: this, index }) : options.mediaScript;
+        const item = script?.samples?.[index] ?? script?.fragments?.[index];
+        if (item) {
+          const sampleRange = item.start !== undefined && item.end !== undefined ? [[item.start, item.end]] : [];
+          const tracks = item.tracks || { audio: item.audio || [], video: item.video || (item.track === 'video' ? sampleRange : []) };
+          if (item.track === 'audio' && !tracks.audio.length) tracks.audio = sampleRange;
+          this.ranges = unionRanges([...this.ranges, ...applyWindow(tracks.audio || [], this), ...applyWindow(tracks.video || [], this)]);
+          const videoInput = item.videoRanges ?? script?.videoRanges ??
+            (tracks.audio?.length && tracks.video?.length ? intersectRanges(applyWindow(tracks.audio, this), applyWindow(tracks.video, this)) : applyWindow(tracks.video || [], this));
+          video.ranges = unionRanges([...video.ranges, ...(item.videoRanges || script?.videoRanges ? applyWindow(videoInput, this) : videoInput)]);
+          this.parserFragments.push({ track: item.track, rap: item.rap, index });
+        }
+      }
       else if (this.calls.filter(call => call[0] === 'append').length > 1 && !this.ranges.length) {
         this.ranges = [[options.base || 0, (options.base || 0) + 5]]; video.ranges = this.ranges.map(range => [...range]);
       }
-      if (this.videoRanges) video.ranges = this.videoRanges;
+      if (this.videoRanges) video.ranges = unionRanges(this.videoRanges);
       if (auto) video.readyState = 3;
       this.updating = false; this.emit('updateend');
     }
-    fail(name = 'error') { this.emit(name); this.updating = false; this.emit('updateend'); }
+    fail(name = 'error', { late = false } = {}) { this.emit(name); if (late) { this.updating = false; this.emit('updateend'); } }
+    finishUpdate() { this.finish(); }
+    abort() { assert.equal(this.updating, false); log.push(['abort']); this.parserFragments = []; this.appendWindowStart = 0; this.appendWindowEnd = Infinity; if (options.abortEvents !== false) { this.emit('abort'); this.emit('updateend'); } }
   }
   class MS extends Events {
     static checks = [];
     static isTypeSupported(mime) { MS.checks.push(mime); return supported; }
     readyState = 'closed'; eos = 0; sb; mime;
-    constructor() { super(); sources.push(this); }
-    open() { this.readyState = 'open'; this.emit('sourceopen'); }
-    addSourceBuffer(mime) { assert.equal(this.readyState, 'open'); this.mime = mime; return this.sb = new SourceBuffer(); }
+    constructor() { super(); log.push(['MediaSource']); sources.push(this); }
+    open() { log.push([this.readyState === 'closed' ? 'initial-open' : 'duplicate-open']); this.readyState = 'open'; this.emit('sourceopen'); }
+    addSourceBuffer(mime) { assert.equal(this.readyState, 'open'); log.push(['addSourceBuffer', mime]); this.mime = mime; return this.sb = new SourceBuffer(); }
     endOfStream() { assert.equal(this.sb.updating, false); assert.equal(this.readyState, 'open'); this.eos++; this.readyState = 'ended'; }
   }
-  URL.createObjectURL = () => { const url = `blob:test/${sources.length}`; live.add(url); return url; };
+  URL.createObjectURL = () => { log.push(['createObjectURL']); const url = `blob:test/${sources.length}`; live.add(url); return url; };
   URL.revokeObjectURL = url => { assert.equal(live.delete(url), true); revoked.push(url); };
   globalThis.document = { getElementById: () => ({ replaceChildren() {} }), createElement: () => video };
   globalThis.MediaSource = MS;
@@ -104,7 +166,7 @@ function fixture(t, options = {}) {
       cancel() { request.cancels++; request.cancelled = true; request.push({ done: true }); return Promise.resolve(); },
     };
     const bytes = options.init || initBytes(options);
-    const cuts = options.split ? [3, 9, 17, 43, bytes.length] : [bytes.length]; let previous = 0;
+    const cuts = (options.networkSplit || options.split) ? (Array.isArray(options.networkSplit) ? [...options.networkSplit, bytes.length] : [3, 9, 17, 43, bytes.length]) : [bytes.length]; let previous = 0;
     for (const end of cuts) { request.queue.push({ value: bytes.subarray(previous, end), done: false }); previous = end; }
     request.queue.push({ value: Uint8Array.of(1, 2, 3), done: false });
     fetches.push(request);
@@ -129,7 +191,7 @@ function fixture(t, options = {}) {
     start(start = 10, durationSec = 1000) {
       const pending = player.load({ videoId: 'abcdefghijk', durationSec }, start); pending.catch(() => {}); return pending;
     },
-    async ready() { await flush(); sources.at(-1)?.open(); await flush(); video.emit('canplay'); await flush(); },
+    async ready() { await flush(); const latest = sources.at(-1); if (latest && (!absolute || latest.readyState === 'closed')) latest.open(); await flush(); video.emit('canplay'); await flush(); },
     async load(start = 10, duration = 1000) { const pending = f.start(start, duration); await f.ready(); await pending; },
     range(ranges, current = video.currentTime) { f.sb.ranges = ranges.map(range => [...range]); video.ranges = ranges.map(range => [...range]); video._currentTime = current; },
     async dispatch(sec) { const pending = player.seek(sec); t.mock.timers.tick(120); await pending; await flush(); },
