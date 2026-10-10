@@ -10,6 +10,8 @@ import vm from 'node:vm';
 import { constants } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { getLegacyUserDataPath } from '../lib/updater.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { safeToolError } from '../lib/tool-errors.js';
 import { createStore } from '../lib/store.js';
 import { createRunner } from '../lib/runner.js';
 import { createJobs } from '../lib/jobs.js';
@@ -1297,12 +1299,12 @@ async function mainHarness(jobs, options = {}) {
   const source = (await fs.readFile('main.js', 'utf8')).split('async function initialize()')[0]
     .replace(/^import .*;\r?$/gm, '').replaceAll('import.meta.url', JSON.stringify(new URL('../main.js', import.meta.url).href));
   const context = vm.createContext({ path, fileURLToPath: url => new URL(url).pathname, URL, structuredClone,
-    app: { getPath: () => os.tmpdir(), setPath() {} }, getLegacyUserDataPath, createRunner: () => options.runner || {}, createPreviewStream: () => options.preview || {}, updaterPkg: { autoUpdater: {} },
+    app: { getPath: () => os.tmpdir(), setPath() {} }, getLegacyUserDataPath, AsyncLocalStorage, safeToolError, createYtdlpUpdater: () => ({}), createManagedTool: () => ({}), createFfmpegDescriptor: () => ({}), createRunner: () => options.runner || {}, createPreviewStream: () => options.preview || {}, updaterPkg: { autoUpdater: {} },
     stat: fs.stat, mkdir: fs.mkdir, access: fs.access, constants, isDeepStrictEqual, normalizeYouTubeUrl, normalizeFileName, validateStateSnapshot,
     BrowserWindow: Window, Menu: { setApplicationMenu() {} }, ipcMain: { handle: (name, fn) => handlers.set(name, fn) },
     shell: { showItemInFolder: target => opened.push(['file', target]), openPath: async target => { opened.push(['folder', target]); return ''; } },
     console: { error: (...args) => errors.push(args) }, injectedJobs: jobs, injectedSettings: options.settings });
-  vm.runInContext(source + '\njobs = injectedJobs; settings = injectedSettings || structuredClone(defaults); ytdlpUpdater = { effective: async () => ({ path: settings.ytDlpPath }), refreshSettings: async () => {}, withExecution: callback => callback() }; mainURL = "http://127.0.0.1:1234/renderer/index.html"; installIPC(); globalThis.makeWindow = createWindow; globalThis.migrate = migrateSettings; globalThis.readSettings = () => structuredClone(settings);', context);
+  vm.runInContext(source + '\njobs = injectedJobs; settings = injectedSettings || structuredClone(defaults); ytdlpUpdater = { effective: async () => ({ path: settings.ytDlpPath, usable: true, version: "test" }), refreshSettings: async () => {}, withExecution: callback => callback(), getState: () => ({}) }; ffmpegUpdater = { effective: async () => ({ path: settings.ffmpegPath, usable: true, version: "test" }), refreshSettings: async () => {}, getState: () => ({}), ensureInstalled: async () => {} }; mainURL = "http://127.0.0.1:1234/renderer/index.html"; installIPC(); globalThis.makeWindow = createWindow; globalThis.migrate = migrateSettings; globalThis.readSettings = () => structuredClone(settings);', context);
   await context.makeWindow();
   const window = windows[0];
   const event = () => ({ sender: window.webContents, senderFrame: window.webContents.mainFrame });
