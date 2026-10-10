@@ -13,6 +13,18 @@ if (process.isMainFrame !== false) {
     };
   };
 
+  const onToolsChanged = (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('tools:changed', listener);
+    let subscribed = true;
+
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      ipcRenderer.removeListener('tools:changed', listener);
+    };
+  };
+
   contextBridge.exposeInMainWorld('ytcut', Object.freeze({
     bootstrap: () => ipcRenderer.invoke('app:bootstrap', {}),
     metadata: (payload) => ipcRenderer.invoke('video:metadata', payload),
@@ -31,6 +43,10 @@ if (process.isMainFrame !== false) {
     onQueueChanged: removeQueueChangedListener,
     ytdlpState: () => ipcRenderer.invoke('ytdlp:state', {}),
     checkYtdlp: () => ipcRenderer.invoke('ytdlp:check', {}),
+    toolsState: () => ipcRenderer.invoke('tools:state', {}),
+    checkTool: (toolId) => ipcRenderer.invoke('tools:check', { toolId }),
+    downloadTool: ({ toolId, candidateId, acknowledgedBytes }) => ipcRenderer.invoke('tools:download', { toolId, candidateId, acknowledgedBytes }),
+    onToolsChanged,
     onYtdlpChanged: callback => {
       const listener = (_event, state) => callback(state);
       ipcRenderer.on('ytdlp:changed', listener);
