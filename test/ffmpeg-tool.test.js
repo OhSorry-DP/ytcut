@@ -6,15 +6,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { createRequire } from 'node:module';
-import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-const require = createRequire(import.meta.url);
-const descriptorModule = { exports: {} };
-const descriptorSource = fs.readFileSync(new URL('../lib/ffmpeg-tool.js', import.meta.url), 'utf8');
-vm.runInThisContext(`(function (require, module, exports, __filename, __dirname) { ${descriptorSource}\n})`, { filename: 'lib/ffmpeg-tool.js' })(require, descriptorModule, descriptorModule.exports, new URL('../lib/ffmpeg-tool.js', import.meta.url).pathname, path.dirname(new URL('../lib/ffmpeg-tool.js', import.meta.url).pathname));
-const { createFfmpegDescriptor } = descriptorModule.exports;
+import { createFfmpegDescriptor } from '../lib/ffmpeg-tool.js';
 
 const ZIP_NAME = 'ffmpeg-n9.0-latest-win64-gpl-9.0.zip';
 const ROOT = 'ffmpeg-n9.0-latest-win64-gpl-9.0';
