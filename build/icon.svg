@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#23304a"/>
+      <stop offset="1" stop-color="#0f1522"/>
+    </linearGradient>
+    <linearGradient id="seg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4f7dff"/>
+      <stop offset="1" stop-color="#7aa2ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+  <rect x="8.5" y="8.5" width="239" height="239" rx="55.5" fill="none" stroke="#3a4a6b" stroke-opacity="0.55"/>
+  <!-- 재생 버튼 -->
+  <path d="M100 64 L100 160 Q100 168 107 164 L184 118 Q191 114 184 110 L107 60 Q100 56 100 64 Z" transform="translate(-6 4)" fill="#ffffff"/>
+  <!-- 타임라인과 선택 구간 -->
+  <rect x="40" y="186" width="176" height="14" rx="7" fill="#2f3d5c"/>
+  <rect x="84" y="186" width="92" height="14" rx="3" fill="url(#seg)"/>
+  <rect x="76" y="174" width="14" height="38" rx="5" fill="#ffffff"/>
+  <rect x="170" y="174" width="14" height="38" rx="5" fill="#ffffff"/>
+</svg>

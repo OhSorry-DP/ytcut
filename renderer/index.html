@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stream Cut</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <main class="workspace">
+    <div class="main-panel">
+      <header class="app-header"><h1>Stream Cut</h1><div class="header-tools"><div class="tools-line"><p id="tools">도구 사용 가능 여부 확인 중</p><span id="ytdlp-flash" role="status" hidden>yt-dlp 업데이트됨</span></div><button id="settings-button" type="button" class="queue-action" data-tip="설정" aria-label="설정"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M9.5 3h5l.5 3 2 1.2 2.8-1 2.5 4.3-2.3 2v2.3l2.3 2-2.5 4.3-2.8-1-2 1.2-.5 3h-5l-.5-3-2-1.2-2.8 1-2.5-4.3 2.3-2v-2.3l-2.3-2 2.5-4.3 2.8 1L9 6Z" transform="translate(0 -1.5) scale(1 .9)"/><circle cx="12" cy="12" r="3"/></svg></button></div></header>
+      <div id="update-banner" role="status" aria-live="polite" hidden>
+        <span id="update-banner-text"></span>
+        <button id="update-banner-action" type="button" class="primary" hidden></button>
+        <button id="update-banner-dismiss" type="button" hidden>나중에</button>
+        <progress id="update-progress" max="100" aria-label="업데이트 다운로드 진행률" hidden></progress>
+      </div>
+      <div class="load-controls">
+        <label for="url-input">YouTube URL</label>
+        <input id="url-input" type="text" inputmode="url" autocomplete="url" placeholder="YouTube 동영상 URL을 입력하세요">
+        <button id="load-button" type="button" class="primary">불러오기</button>
+      </div>
+      <p id="app-error" role="alert" aria-live="polite"></p>
+      <section id="editor" class="editor is-disabled" aria-labelledby="video-title">
+        <h2 id="video-title">편집할 동영상을 불러오세요</h2>
+        <div class="player-area"><div class="player-wrap"><div id="player" aria-label="동영상 플레이어"></div></div>
+          <span id="fallback-badge" hidden>대체 플레이어</span>
+          <div id="loading-overlay" role="status" aria-live="polite" hidden>
+            <span class="loading-spinner" aria-hidden="true"></span>
+            <span>영상 불러오는 중…</span>
+          </div>
+        </div>
+        <p id="player-error" role="alert" aria-live="polite"></p>
+        <div id="timeline" aria-label="타임라인">
+          <div class="timeline-heading"><span>선택 구간</span><span>클릭 재생 · Ctrl+휠 확대 · Space 재생/정지 · ←→ 10초 · Ctrl+←→ 1초 · I/O 시작/끝 · P 미리보기</span></div>
+          <div id="timeline-scroll" tabindex="-1" aria-label="타임라인 스크롤 영역">
+            <div id="timeline-content">
+              <div id="timeline-ticks" aria-hidden="true"></div>
+              <div id="selection" aria-label="선택 구간">
+                <button id="start-handle" type="button" aria-label="시작점 이동" disabled></button>
+                <button id="end-handle" type="button" aria-label="끝점 이동" disabled></button>
+              </div>
+              <div id="playhead" aria-hidden="true"></div>
+            </div>
+          </div>
+          <div class="time-controls">
+            <div class="field"><label for="start-input">시작 시간</label><input id="start-input" type="text" value="00:00:00" disabled></div>
+            <div class="field"><label for="end-input">끝 시간</label><input id="end-input" type="text" value="00:00:00" disabled></div>
+            <button id="mark-start-button" type="button" class="mark-button" data-tip="현재를 시작으로 (I)" aria-label="현재를 시작으로 (I)" disabled>┃◀</button>
+            <button id="mark-end-button" type="button" class="mark-button" data-tip="현재를 끝으로 (O)" aria-label="현재를 끝으로 (O)" disabled>▶┃</button>
+            <button id="preview-button" type="button" class="mark-button" data-tip="시작점부터 재생 (P)" aria-label="시작점부터 재생 (P)" disabled>▶</button>
+            <div class="field zoom-field"><label for="zoom-input">확대</label><input id="zoom-input" type="range" min="1" max="64" value="1" disabled></div>
+            <div class="field"><label for="editor-format">내보내기 형식</label><select id="editor-format" disabled><option value="mp4" selected>MP4</option><option value="mkv">MKV</option></select></div>
+            <div class="field"><label for="editor-cut-mode">자르기 모드</label><select id="editor-cut-mode" disabled><option value="accurate">정확하게</option><option value="fast">빠르게 (키프레임 경계 오차 가능)</option></select></div>
+            <div class="field download-name"><label for="file-name-input">파일명</label><input id="file-name-input" type="text" maxlength="120" placeholder="비우면 영상 제목" autocomplete="off" title="확장자 없이 입력하세요" disabled></div>
+            <button id="download-button" type="button" class="primary" disabled>다운로드</button>
+          </div>
+        </div>
+      </section>
+    </div>
+    <aside class="sidebar" aria-labelledby="queue-heading">
+      <div class="queue-heading"><h2 id="queue-heading">다운로드 대기열</h2><span id="queue-count" class="count-badge" aria-label="대기열 항목 수">0</span></div>
+      <p id="queue-empty">아직 다운로드 항목이 없습니다.<br>동영상을 불러와 구간을 선택하세요.</p>
+      <ul id="queue-list" aria-live="polite"></ul>
+    </aside>
+  </main>
+  <dialog id="settings-dialog" aria-labelledby="settings-heading">
+    <header class="settings-header"><h2 id="settings-heading">설정</h2><button id="settings-close-button" type="button" aria-label="닫기">×</button></header>
+    <div class="settings-body">
+      <nav class="settings-tabs" role="tablist" aria-orientation="vertical" aria-label="설정 범주">
+        <button id="settings-tab-general" type="button" role="tab" aria-selected="true" aria-controls="settings-panel-general" tabindex="0">일반</button>
+        <button id="settings-tab-tools" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-tools" tabindex="-1">도구</button>
+        <button id="settings-tab-update" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-update" tabindex="-1">앱 업데이트</button>
+      </nav>
+      <form id="settings-form">
+        <section id="settings-panel-general" role="tabpanel" aria-labelledby="settings-tab-general">
+          <label for="output-dir">출력 폴더</label><input id="output-dir" name="output-dir" type="text" autofocus>
+          <button id="choose-output-button" type="button">폴더 선택</button>
+          <p id="output-dir-help">새 다운로드 완성 파일은 이 폴더에 저장됩니다. 기존 대기열은 기존 폴더에 저장됩니다.</p>
+          <label for="cut-mode">자르기 모드</label><select id="cut-mode" name="cut-mode"><option value="accurate">정확하게</option><option value="fast">빠르게</option></select>
+          <label for="settings-format">기본 출력 형식</label><select id="settings-format" name="settings-format"><option value="mp4" selected>MP4</option><option value="mkv">MKV</option></select>
+          <label for="preview-resolution">미리보기 해상도</label>
+          <select id="preview-resolution" name="preview-resolution" aria-describedby="preview-resolution-help">
+            <option value="360">360p</option><option value="480" selected>480p</option><option value="720">720p</option>
+          </select>
+          <p id="preview-resolution-help">미리보기에만 적용, 다운로드 화질과 무관. 대체 플레이어에서 선택한 해상도 이하의 스트림 중 가장 높은 화질을 사용합니다. 변경 사항은 다음 영상 로드부터 적용됩니다.</p>
+          <label for="always-use-local-player"><input id="always-use-local-player" name="always-use-local-player" type="checkbox" checked aria-describedby="always-use-local-player-help"> 항상 대체 플레이어 사용</label>
+          <p id="always-use-local-player-help">영상을 불러올 때 대체 플레이어를 먼저 사용합니다. 끄면 YouTube 플레이어를 먼저 사용하고 임베드 오류가 날 때 대체 플레이어로 전환합니다. 대체 플레이어 준비에 실패하면 YouTube 플레이어로 전환합니다.</p>
+        </section>
+        <section id="settings-panel-tools" role="tabpanel" aria-labelledby="settings-tab-tools" hidden>
+          <label for="yt-dlp-path">yt-dlp 경로</label><input id="yt-dlp-path" name="yt-dlp-path" type="text">
+          <label for="ffmpeg-path">FFmpeg 경로</label><input id="ffmpeg-path" name="ffmpeg-path" type="text">
+          <div class="ytdlp-settings" hidden>
+            <strong>yt-dlp</strong>
+            <label><input id="auto-update-ytdlp" type="checkbox" checked> yt-dlp 자동 업데이트</label>
+            <span id="ytdlp-current-version"></span>
+            <button id="ytdlp-check-button" type="button">지금 확인</button>
+            <p id="ytdlp-status" role="status" aria-live="polite"></p>
+          </div>
+        </section>
+        <section id="settings-panel-update" role="tabpanel" aria-labelledby="settings-tab-update" hidden>
+        <div class="update-settings" hidden>
+          <strong>업데이트</strong>
+          <span id="update-current-version"></span>
+          <button id="update-check-button" type="button">업데이트 확인</button>
+          <p id="update-check-result" role="status" aria-live="polite"></p>
+        </div>
+        </section>
+      </form>
+    </div>
+    <p id="settings-error" role="alert" aria-live="polite"></p>
+    <footer class="settings-footer"><button id="save-settings-button" type="submit" form="settings-form" class="primary">설정 저장</button><button id="settings-dismiss-button" type="button">닫기</button></footer>
+  </dialog>
+</body>
+</html>

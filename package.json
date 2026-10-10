@@ -1,0 +1,66 @@
+{
+  "name": "streamcut",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "dist": "electron-builder --win --publish never"
+  },
+  "devDependencies": {
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3"
+  },
+  "description": "영상 주소(URL)를 입력하면 yt-dlp 로 영상을 가져와 원하는 구간만 잘라 저장하는 Windows Electron 앱",
+  "author": "OhSorry-DP",
+  "homepage": "https://github.com/OhSorry-DP/streamcut",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OhSorry-DP/streamcut.git"
+  },
+  "build": {
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "OhSorry-DP",
+        "repo": "streamcut"
+      }
+    ],
+    "appId": "com.ohsorry.ytcut",
+    "productName": "Stream Cut",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.cjs",
+      "lib/**/*",
+      "renderer/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": true,
+      "forceCodeSigning": false,
+      "artifactName": "StreamCut-${version}-${os}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "portable": {
+      "artifactName": "StreamCut-${version}-portable.${ext}"
+    }
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9"
+  }
+}
