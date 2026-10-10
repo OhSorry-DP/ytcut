@@ -326,11 +326,10 @@ export function createLocalPlayer(containerId, { prepare, onTime, onError, onBuf
           await prune(s);
           if (ownsRequest(s, r)) {
             if (r.purpose === 'refill') {
-              const index = covering(video.buffered, r.start);
-              const progress = index < 0 ? 0 : video.buffered.end(index) - r.start;
-              s.noProgress = progress < 0.001 ? (s.lastRefillStart === r.start ? s.noProgress + 1 : 1) : 0;
-              s.lastRefillStart = r.start;
-              if (s.noProgress >= 2) throw failure();
+              // 요청 시점의 버퍼 끝과 비교해 반올림 오차를 진행량으로 세지 않는다.
+              const ranges = Array.from({ length: video.buffered.length }, (_, i) => ({ start: video.buffered.start(i), end: video.buffered.end(i) }));
+              const end = ranges.find(range => range.start <= r.bufferEnd && range.end >= r.bufferEnd)?.end ?? r.bufferEnd;
+              if (end - r.bufferEnd < 0.001) s.actualEnd = end;
             }
             r.eof = true; r.stopped = true; r.stopReason = 'eof';
           }
@@ -389,7 +388,8 @@ export function createLocalPlayer(containerId, { prepare, onTime, onError, onBuf
       listen(s, ms, 'sourceclose', () => { void recover(s); });
       video.src = s.url; video.load();
     }
-    const r = { id: ++requestId, target: clamp(sec), start: Number(clamp(sec).toFixed(3)), purpose, controller: new AbortController() };
+    const start = purpose === 'refill' ? Math.min(duration, Math.floor(sec * 1000) / 1000) : Number(clamp(sec).toFixed(3));
+    const r = { id: ++requestId, target: clamp(sec), start, bufferEnd: sec, purpose, controller: new AbortController() };
     s.request = r; s.assigned = undefined;
     if (purpose === 'seek') { armReadiness(s); startBuffering(); }
     void consume(s, r).finally(() => clearTimeout(r.timer));
@@ -404,13 +404,16 @@ export function createLocalPlayer(containerId, { prepare, onTime, onError, onBuf
     if (!videoOwns(s)) return;
     align();
     s.request?.wake?.();
-    if (!ended && target === undefined && pendingTarget === undefined && actual() >= duration - 0.1) { endpoint(); return; }
+    if (!ended && target === undefined && pendingTarget === undefined &&
+        (actual() >= duration - 0.1 || (s.actualEnd !== undefined && actual() >= s.actualEnd - 0.1))) { endpoint(); return; }
     if (s.sb && !s.pruning) {
       s.pruning = true; void prune(s).catch(() => { if (owns(s)) void recover(s); }).finally(() => { s.pruning = false; });
     }
     if (s.request?.stopped && wantPlay && !ended && !failed && !preparing && target === undefined && pendingTarget === undefined && front(s) <= 10) {
       const i = covering(video.buffered, actual());
-      openStream(i < 0 ? actual() : video.buffered.end(i), 'refill');
+      const end = i < 0 ? actual() : video.buffered.end(i);
+      if (end >= duration - 0.1 || (s.actualEnd !== undefined && end >= s.actualEnd - 0.001)) return;
+      openStream(end, 'refill');
     }
   }
   const listeners = {};

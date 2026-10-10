@@ -666,13 +666,59 @@ test('absolute refill cap wait does not use the fifteen-second readiness timeout
   assert.equal(f.prepares, 1); assert.equal(f.video.currentTime, 10); assert.equal(f.video.paused, false); assert.deepEqual(f.errors, []);
 });
 
-test('absolute two EOF refills at the same non-progressing boundary recover without fake endpoint', async t => {
+test('absolute non-progressing EOF refill records a short actual end without recovery until playback arrives', async t => {
   const f = fixture(t, { absolute: true, mediaScript: ({ sb }) => ({ fragments: sb.timestampOffset === 10 ? [{ video: [[0, 5]] }] : [] }) });
   await f.load(10); await f.player.togglePlay(); await f.push(null);
   f.video.emit('timeupdate'); await flush(); assert.equal(f.fetches[1].url, '/preview/token.mp4?start=15.000'); await f.push(null);
-  f.video.emit('timeupdate'); await flush(); assert.equal(f.fetches[2].url, '/preview/token.mp4?start=15.000'); await f.push(null);
-  assert.equal(f.prepares, 2); assert.equal(f.player.getTime(), 10); assert.equal(f.times.includes(1000), false);
-  await f.ready(); assert.deepEqual(f.errors, []);
+  for (let i = 0; i < 10; i++) { t.mock.timers.tick(250); await flush(); }
+  assert.equal(f.fetches.length, 2); assert.equal(f.prepares, 1); assert.equal(f.player.getTime(), 10); assert.equal(f.times.includes(1000), false);
+  f.video._currentTime = 15; f.video.emit('timeupdate'); await flush();
+  assert.equal(f.player.getTime(), 1000); assert.equal(f.times.at(-1), 1000); assert.equal(f.video.paused, true);
+  await f.player.togglePlay(); assert.equal(f.video.paused, true); assert.equal(f.sources.length, 1); assert.deepEqual(f.errors, []);
+  await f.player.seekAndPlay(12); await flush(); t.mock.timers.tick(1000); await flush();
+  assert.equal(f.video.currentTime, 12); assert.equal(f.video.paused, false); assert.equal(f.fetches.length, 2); assert.equal(f.sources.length, 1);
+});
+
+test('끝 근처 EOF 버퍼는 metadata 끝보다 조금 짧거나 길어도 refill하지 않는다', async t => {
+  const f = fixture(t); await f.load(10, 1200); await f.player.togglePlay(); await f.push(null);
+  for (const end of [1199.9, 1200, 1200.021333]) {
+    f.range([[10, 50], [1195, end]], 1195); f.video.emit('timeupdate'); await flush();
+    t.mock.timers.tick(1000); await flush(); assert.equal(f.fetches.length, 1);
+  }
+  f.video._currentTime = 1199.95; f.video.emit('timeupdate'); await flush();
+  assert.equal(f.player.getTime(), 1200); assert.equal(f.times.at(-1), 1200); assert.equal(f.video.paused, true);
+});
+
+test('끝까지 재생한 뒤 캐시의 15초로 복귀해도 fetch와 MediaSource를 추가하지 않는다', async t => {
+  const f = fixture(t); await f.load(10, 1200); await f.player.togglePlay(); await f.push(null);
+  f.range([[10, 50], [1195, 1200.021333]], 1195);
+  const sb = f.sb, url = f.video.src;
+  f.video._currentTime = 1199.95; f.video.emit('timeupdate'); await flush();
+  assert.equal(f.player.getTime(), 1200);
+  await f.player.seekAndPlay(15); await flush(); t.mock.timers.tick(1000); await flush();
+  assert.equal(f.video.currentTime, 15); assert.equal(f.video.paused, false);
+  assert.equal(f.fetches.length, 1); assert.equal(f.sources.length, 1); assert.equal(f.sb, sb); assert.equal(f.video.src, url);
+  assert.equal(f.prepares, 1); assert.deepEqual(f.errors, []);
+});
+
+test('refill은 밀리초 내림 전 버퍼 끝의 증가량으로 실제 끝을 판단한다', async t => {
+  const f = fixture(t, { mediaScript: ({ sb }) => ({ fragments: sb.timestampOffset === 10 ? [{ video: [[0, 5.021333]] }] : [] }) });
+  await f.load(10); await f.player.togglePlay(); await f.push(null);
+  f.video.emit('timeupdate'); await flush();
+  assert.equal(f.fetches[1].url, '/preview/token.mp4?start=15.021');
+  await f.push(null); t.mock.timers.tick(1000); await flush(); assert.equal(f.fetches.length, 2);
+  f.video._currentTime = 15.021333; f.video.emit('timeupdate'); await flush();
+  assert.equal(f.times.at(-1), 1000); assert.equal(f.prepares, 1); assert.deepEqual(f.errors, []);
+});
+
+test('EOF refill이 버퍼를 0.001초 이상 늘렸다면 다음 refill을 허용한다', async t => {
+  const f = fixture(t, { mediaScript: ({ sb }) => ({ fragments: [{ video: [[0, sb.timestampOffset === 10 ? 5 : 0.002]] }] }) });
+  await f.load(10); await f.player.togglePlay(); await f.push(null);
+  f.video.emit('timeupdate'); await flush(); await f.push(null);
+  assert.equal(f.video.buffered.end(0), 15.002);
+  f.video.emit('timeupdate'); await flush();
+  assert.equal(f.fetches.length, 3); assert.equal(f.fetches[2].url, '/preview/token.mp4?start=15.002');
+  assert.equal(f.prepares, 1); assert.equal(f.times.includes(1000), false); assert.deepEqual(f.errors, []);
 });
 
 test('absolute eviction removes eligible whole ranges before trimming a protected long range', async t => {
