@@ -1285,12 +1285,32 @@ test('C-12 edit events never restore and running active transitions and IME bloc
 });
 
 async function mainHarness(jobs, options = {}) {
-  const handlers = new Map(), windows = [], opened = [], errors = [];
+  const handlers = new Map(), windows = [], opened = [], errors = [], sent = [];
+  const createTestTool = (toolId, getSettings) => {
+    const pathKey = toolId === 'ytDlp' ? 'ytDlpPath' : 'ffmpegPath';
+    const defaultCommand = toolId === 'ytDlp' ? 'yt-dlp' : 'ffmpeg';
+    const selected = () => {
+      const binary = getSettings()[pathKey] ?? defaultCommand;
+      return { path: binary, source: binary === defaultCommand ? 'path' : 'custom', usable: true, version: 'test' };
+    };
+    const getState = () => {
+      const tool = selected();
+      return { toolId, status: tool.source === 'custom' ? 'disabled' : 'idle', source: tool.source,
+        usable: tool.usable, currentVersion: tool.version, revision: 0, latestVersion: null,
+        currentReleaseTag: null, candidateId: null, downloadBytes: null, downloadedBytes: 0,
+        percent: null, manual: false, needsInstall: false, canDownload: false, canRollback: false, error: null };
+    };
+    const settle = async () => getState();
+    return { effective: async () => selected(), getState, refreshSettings: settle, ensureInstalled: settle,
+      queueChanged: settle, check: settle, download: settle, start() {}, stop() {},
+      withExecution: callback => callback(), withToolUse: callback => callback() };
+  };
   class Window extends EventEmitter {
     constructor() {
       super(); windows.push(this); this.destroyed = false;
       this.webContents = new EventEmitter();
       Object.assign(this.webContents, { mainFrame: { url: 'http://127.0.0.1:1234/renderer/index.html' },
+        send: (channel, value) => sent.push([channel, structuredClone(value)]),
         setWindowOpenHandler() {}, session: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {}, webRequest: { onBeforeSendHeaders() {} } } });
     }
     isDestroyed() { return this.destroyed; }
@@ -1303,12 +1323,13 @@ async function mainHarness(jobs, options = {}) {
     stat: fs.stat, mkdir: fs.mkdir, access: fs.access, constants, isDeepStrictEqual, normalizeYouTubeUrl, normalizeFileName, validateStateSnapshot,
     BrowserWindow: Window, Menu: { setApplicationMenu() {} }, ipcMain: { handle: (name, fn) => handlers.set(name, fn) },
     shell: { showItemInFolder: target => opened.push(['file', target]), openPath: async target => { opened.push(['folder', target]); return ''; } },
-    console: { error: (...args) => errors.push(args) }, injectedJobs: jobs, injectedSettings: options.settings });
-  vm.runInContext(source + '\njobs = injectedJobs; settings = injectedSettings || structuredClone(defaults); ytdlpUpdater = { effective: async () => ({ path: settings.ytDlpPath, usable: true, version: "test" }), refreshSettings: async () => {}, withExecution: callback => callback(), getState: () => ({}) }; ffmpegUpdater = { effective: async () => ({ path: settings.ffmpegPath, usable: true, version: "test" }), refreshSettings: async () => {}, getState: () => ({}), ensureInstalled: async () => {} }; mainURL = "http://127.0.0.1:1234/renderer/index.html"; installIPC(); globalThis.makeWindow = createWindow; globalThis.migrate = migrateSettings; globalThis.readSettings = () => structuredClone(settings);', context);
+    console: { error: (...args) => errors.push(args) }, createTestTool, injectedJobs: jobs, injectedSettings: options.settings });
+  vm.runInContext(source + '\njobs = injectedJobs; settings = injectedSettings || structuredClone(defaults); ytdlpUpdater = createTestTool("ytDlp", () => settings); ffmpegUpdater = createTestTool("ffmpeg", () => settings); mainURL = "http://127.0.0.1:1234/renderer/index.html"; installIPC(); globalThis.makeWindow = createWindow; globalThis.migrate = migrateSettings; globalThis.readSettings = () => structuredClone(settings); globalThis.reconcile = reconcileTools;', context);
+  if (typeof jobs.resume === 'function') await context.reconcile();
   await context.makeWindow();
   const window = windows[0];
   const event = () => ({ sender: window.webContents, senderFrame: window.webContents.mainFrame });
-  return { handlers, window, event, opened, errors, context };
+  return { handlers, window, event, opened, errors, sent, context };
 }
 
 test('C-13 real store preserves UTF8 flat names missing paths and legacy nested format migration', async t => {

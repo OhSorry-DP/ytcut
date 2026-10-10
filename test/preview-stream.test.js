@@ -8,6 +8,7 @@ import { setMaxListeners } from 'node:events';
 import { createPreviewStream, createRangeInputProxy, selectPreviewStreams, validVideoId, validToken, parseStart, parseUrls, buildPreviewArgs } from '../lib/preview-stream.js';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import { safeToolError } from '../lib/tool-errors.js';
 
 const id = 'Abcdef12_-3', token = 'a'.repeat(32);
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -152,6 +153,8 @@ test('main metadata handler returns only video and populates preview cache witho
   let handler;
   vm.runInNewContext(block, { handle: (channel, callback) => { handler = callback; }, URL, structuredClone,
     normalizeYouTubeUrl: value => value, invalid: (code, message) => Object.assign(new Error(message), { code }),
+    safeToolError, withToolUse: async (toolId, callback) => { assert.equal(toolId, 'ytDlp'); return callback(); },
+    checkTools: async () => ({ ytDlp: { ok: true, version: 'test' }, ffmpeg: { ok: true, version: 'test' } }),
     executionSettings: async () => ({ previewResolution: 720 }), runner: { metadataWithStreams: async (url, settings) => {
       assert.equal(settings.previewResolution, 720);
       return { video, streams: { muxed: videoFormat().url }, formats: [360, 480, 720].map(height => ({ ...videoFormat(height), acodec: 'mp4a.40' })) };
