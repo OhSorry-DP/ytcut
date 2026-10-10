@@ -4,19 +4,24 @@
 
 ```bash
 npm install
-npm test            # node --test (17개 파일 / 277개, skipped·todo 는 0 이어야 한다)
+npm test            # node --test (실행 시점의 전체 결과를 확인; 파일/테스트 수를 고정하지 않는다)
 npm start           # electron .
 ```
 
 - 🔴 **`ELECTRON_RUN_AS_NODE`**: VS Code 터미널·Claude Code 셸에는 이 변수가 `1` 로 켜져 있어 Electron 이 Node 로 실행돼 `import { app } from 'electron'` 이 깨진다(`does not provide an export named 'BrowserWindow'`). 항상 지우고 실행: bash `env -u ELECTRON_RUN_AS_NODE npm start`, PowerShell `$env:ELECTRON_RUN_AS_NODE=$null; npm start`.
 - 개발 모드(`npm start`)에서는 앱 자동 업데이트가 꺼진다(`isPackaged` 아님).
-- 외부 도구: `yt-dlp`·`ffmpeg` 가 PATH 에 있어야 한다(yt-dlp 는 없거나 오래되면 앱이 알아서 `userData/bin` 에 받는다).
-- 2026-10-10 `npm test` 실행 결과: 277개 통과, 실패·취소·skipped·todo 모두 0. 부하 시 통합 테스트가 간헐적으로 실패했다는 기존 보고는 [handoff.md](handoff.md) 의 알려진 한계를 참고한다.
+- 외부 도구: `yt-dlp` 는 PATH 또는 앱 관리 사본을 사용할 수 있다. ffmpeg는 기본 명령 경로에서 유효한 PATH 실행 파일이 없으면 앱이 관리 GPL 정적 빌드를 최초 설치한다. 최초 설치에는 네트워크가 필요하며, 크기 안내와 후보 확인 뒤 ZIP을 받는다. ffmpeg 관리본 사용은 `autoUpdateFfmpeg` 설정과 독립적이고, 이 설정은 주기적 갱신 확인만 제어한다. 사용자 지정 경로는 자동 설치·교체되지 않는다.
+- 테스트 파일·테스트 수는 저장소 상태에 따라 달라진다. `npm test`의 현재 실행 결과를 확인해 통과·실패·취소·skipped·todo를 보고하고, 변경한 최상위 테스트 파일 수와 전체 실행 수를 구분한다. 이전 실행 수를 현재 결과로 인용하지 않는다.
+- 2026-10-10 `npm test` 실행: 354개 통과, 실패·취소·skipped·todo 0. 이 실행은 이번 문서 조각의 변경 테스트 수를 뜻하지 않는다(이번 조각은 최상위 테스트 파일을 추가·수정하지 않았다).
+- 자동 설치는 복원된 대기열 항목을 삭제하거나 실패 처리하지 않는다. ffmpeg가 없어도 대기 항목이 있으면 설치를 보류하며, 도구가 준비되기 전 새 다운로드 추가·재시도는 거부된다. 네트워크 장애 중 정상 관리본이 있으면 계속 사용한다. 실제 누락 시 오프라인 상태로 최초 설치할 수 없으므로 연결 후 재시도하거나 유효한 도구 경로를 지정한다.
+- 배포 시 GPL 고지와 해당 바이너리에 대응하는 소스 제공 안내 및 공급자 릴리즈 링크를 포함한다. libx264가 포함된 GPL 빌드의 소스 제공 조건은 출하 전 별도 검토가 필요하다.
 
 ## 2. 단위 테스트의 한계와 "실제 앱 검증"
 
-가짜(fake) 의존으로 도는 단위 테스트는 **아래를 전부 놓쳤다** — 반드시 실제 Electron 에서 확인한다.
+가짜(fake) 의존으로 도는 단위 테스트는 과거 다음 문제를 놓친 적이 있다 — 반드시 실제 Electron 에서 확인한다.
 - ESM/CJS 혼재(브라우저가 `lib/time.js` 를 import 하는데 CJS 라 깨짐), 모듈 간 계약 불일치(URL 정규화 함수가 문자열을 돌려주는데 main 은 객체로 가정), 최상위 `await app.whenReady()` 교착, GitHub 릴리즈 파일 호스트(`release-assets.githubusercontent.com`) 허용 목록 누락.
+
+관리 도구 fixture 테스트는 자산 선택, 체크섬, tar 목록·추출, 버전 probe와 큐·미리보기 교체 조정을 검사하지만 실제 GitHub 연결, Windows 사용자 환경의 최초 설치, 오프라인 복원, Electron UI 통합을 증명하지 않는다. 이 실행에서 확인한 릴리즈 자산은 9.0 GPL 정적 ZIP이며 체크섬·ZIP 크기·루트 경로·Windows tar 출력·`ffmpeg -version`의 n9.0.2 및 libx264 포함을 실제 자산으로 대조했다. 설정 저장·최초 설치 안내·교체 장벽의 실제 앱 동작은 이 테스트 결과만으로 확인된 것으로 간주하지 않는다.
 
 ### 실제 앱 + CDP 검증 레시피
 ```bash
@@ -29,7 +34,7 @@ env -u ELECTRON_RUN_AS_NODE node_modules/electron/dist/electron.exe \
 - 재생 검증: `<video>` 의 `webkitDecodedFrameCount`(프레임 디코딩)·`webkitAudioDecodedByteCount`(오디오 디코딩)로 실제 재생을 증명한다.
 - 기본 창 스크롤: `document.documentElement.scrollHeight == clientHeight` (기본 창 콘텐츠 영역 ≈ 1184×811).
 - 패키지 빌드 검증: `dist/win-unpacked/"Stream Cut.exe"` 에 같은 옵션을 준다. 0.5.0부터 userData가 고정되므로 별도 Windows 테스트 계정에서 실제 데이터 경로가 격리됐는지 먼저 확인한다.
-- 검증용 영상: `jNQXAC9IVRw`(19초, 임베드 허용 — 가장 빠른 회귀용), `40tXXfoxqhI`(3시간 40분, **임베드 차단 → 대체 플레이어 재현용**, 사용자 제공), `dQw4w9WgXcQ`(이 환경에서 임베드 차단). 구간 다운로드 실측용으로는 짧은 구간(20~80초)만 받는다.
+- 영상 검증은 사용 권한이 있는 짧은 공개 영상과 임베드 허용·차단 사례를 각각 사용한다. 구간 다운로드 실측은 짧은 구간(20~80초)으로 제한하고, 검증 영상 ID나 사이트별 접근 특성을 제품 문서에 고정하지 않는다.
 - 🔴 평가 스크립트 작성 팁: bash heredoc 안에서 따옴표가 꼬이면 **스크립트 전체가 시작도 못 하고 죽는다**(실제 겪음). 스크립트·지시서는 heredoc 대신 파일 쓰기 도구로 만든다. `Runtime.evaluate` 문자열 안의 `\\n`·복잡한 정규식 이스케이프는 `undefined` 를 반환하며 조용히 실패한다 — 단순하게 쓰고 결과가 `undefined` 면 스크립트 문제부터 의심.
 
 ## 3. 릴리즈 절차 (🔴 push·릴리즈는 사용자가 그 턴에 "푸시/배포/올려"라고 명시했을 때만)
