@@ -37,7 +37,7 @@ test('metadata bot 응답은 안전한 BOT_CHECK으로 분류한다', async () =
 test('metadata 일반 오류는 민감한 stderr를 노출하지 않는다', async () => {
   const runner = metadataRunner('fatal internal failure https://private.invalid/path');
   await assert.rejects(runner.metadata(sourceUrl), error => {
-    assert.equal(error.code, 'TOOL_FAILED');
+    assert.equal(error.code, 'METADATA_FAILED');
     assert.equal(error.message.includes('private.invalid'), false);
     return true;
   });
@@ -68,7 +68,7 @@ test('metadata 취소, spawn 실패, timeout을 처리한다', async t => {
 
 test('진행률 stderr는 오류 본문으로 분류하지 않는다', async () => {
   await assert.rejects(metadataRunner('[download] 42.0% of 10.00MiB at 1.00MiB/s').metadata(sourceUrl), error => {
-    assert.equal(error.code, 'TOOL_FAILED');
+    assert.equal(error.code, 'METADATA_FAILED');
     assert.equal(error.message.includes('42.0%'), false);
     return true;
   });
@@ -84,7 +84,8 @@ test('exit 0의 JS 경고는 성공 결과에 warning으로 남는다', async ()
     });
     return child;
   }});
-  const result = await runner.metadata(sourceUrl);
-  assert.equal(result.videoId, 'id');
+  const result = await runner.metadataWithStreams(sourceUrl);
+  assert.equal(result.video.videoId, 'id');
+  assert.equal(Object.hasOwn(result.video, 'warnings'), false);
   assert.equal(result.warnings[0].code, 'JS_RUNTIME_MISSING');
 });

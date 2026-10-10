@@ -385,7 +385,7 @@ test('ffmpeg progress noise cannot overwrite stderr error tail', async () => {
   calls[0].c.stderr.write(('frame=10\nfps=1\nbitrate=N/A\ntotal_size=2\nout_time_us=N/A\nout_time_ms=1\nout_time=00:00:01\nspeed=N/A\ndup_frames=0\ndrop_frames=0\nstream_0_0_q=1\nprogress=continue\n').repeat(1000));
   calls[0].c.emit('close', 1);
   await assert.rejects(job.done, error => {
-    assert.equal(error.message, 'ERROR: media unavailable\nWARNING: retry exhausted\n');
+    assert.equal(error.message, '콘텐츠 정보를 가져오지 못했습니다. 주소와 도구 상태를 확인하세요.');
     return error.code === 'DOWNLOAD_FAILED';
   });
 });
