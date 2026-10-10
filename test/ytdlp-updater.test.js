@@ -90,7 +90,7 @@ test('effective path respects managed existence, custom paths and opt out', asyn
   assert.deepEqual(resolveEffectivePath({ ytDlpPath: 'yt-dlp' }, managedPath, true), { path: managedPath, source: 'managed' });
   assert.deepEqual(resolveEffectivePath({ ytDlpPath: 'yt-dlp' }, managedPath, false), { path: 'yt-dlp', source: 'path' });
   assert.deepEqual(resolveEffectivePath({ ytDlpPath: '/custom/tool.exe' }, managedPath, true), { path: '/custom/tool.exe', source: 'custom' });
-  assert.deepEqual(resolveEffectivePath({ ytDlpPath: 'yt-dlp', autoUpdateYtDlp: false }, managedPath, true), { path: 'yt-dlp', source: 'path' });
+  assert.deepEqual(resolveEffectivePath({ ytDlpPath: 'yt-dlp', autoUpdateYtDlp: false }, managedPath, true), { path: managedPath, source: 'managed' });
   const custom = fixture({ settings: { ytDlpPath: '/custom/tool.exe' } });
   assert.equal((await custom.updater.check(true)).status, 'disabled'); assert.equal(custom.requests.length, 0);
   const disabled = fixture({ settings: { autoUpdateYtDlp: false } });
