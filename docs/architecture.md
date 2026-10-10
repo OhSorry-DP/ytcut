@@ -110,7 +110,7 @@ lib/queue-state.js, yt-args.js, progress.js   순수 로직(큐 검증·전이, 
 7. 사용자 제공 기존 실측(40tXXfoxqhI): 처음 로드 약 4.1초(이전 9.1초), 버퍼 안 ±10초 약 0.04초, 재생 4초 후 앞쪽 버퍼 약 183초, 범위 밖 이동 0.8~2.4초(이전 4~5초). 입력 단일 연결은 실시간 약 2배속으로 제한되었지만 10MB Range 청크는 수십 MB/s 였다. 직접 `<video src>` 방식은 정지 상태에서도 앞쪽 약 2.3초만 수신했고 서버 스트림 자체는 초당 약 10MB 로 충분히 빨랐다. 수치는 코드 보장값이 아니며 이번 문서 갱신에서 재측정하지 않았다. 실패한 접근은 [handoff.md](handoff.md) 에 기록한다.
 
 ### 단축키 (`renderer/app.js` 의 전역 keydown/keyup, capture 단계)
-Space 재생/정지, ←/→ ±10초, Ctrl+←/→ ±1초, I/O 현재 시각을 시작/끝으로, P 시작점부터 미리 재생(끝점에서 자동 정지; 직접 이동하면 해제). 텍스트 입력·select 에서는 무시, **설정 모달이 열려 있는 동안 무시**. Space 는 keydown/keyup 모두 `preventDefault`(포커스된 버튼이 눌려 다운로드가 중복되는 사고 방지 — 미리보기 불가 영상에서도 동일). 임베드 플레이어(iframe)를 클릭해 포커스가 가면 부모 문서로 되돌린다. 영상이 시작 전(UNSTARTED/CUED)이면 이동 전에 재생을 먼저 시작(`player.seek`).
+Space 재생/정지, ←/→ ±10초, Shift+←/→ ±60초, Ctrl+←/→ ±1초(Ctrl 이 Shift 보다 우선), [ 다운로드 버튼과 동일(반복 입력 무시), I/O 현재 시각을 시작/끝으로, P 시작점부터 미리 재생(끝점에서 자동 정지; 직접 이동하면 해제). 텍스트 입력·select 에서는 무시, **설정 모달이 열려 있는 동안 무시**. Space 는 keydown/keyup 모두 `preventDefault`(포커스된 버튼이 눌려 다운로드가 중복되는 사고 방지 — 미리보기 불가 영상에서도 동일). 임베드 플레이어(iframe)를 클릭해 포커스가 가면 부모 문서로 되돌린다. 영상이 시작 전(UNSTARTED/CUED)이면 이동 전에 재생을 먼저 시작(`player.seek`).
 
 ### 자동 업데이트 (두 종류, 서로 독립)
 - **앱**(`lib/updater.js`): `autoDownload=false`, 설치형(NSIS)만 전체 자동. 시작 5초 뒤 + 6시간마다 확인. 알림 배너 → 사용자가 다운로드 → 「재시작하여 설치」. 포터블·개발 모드는 릴리즈 페이지 열기. 진행 중 다운로드 작업이 있으면 설치 전 확인창, 정리(`jobs.shutdown`) 후 `quitAndInstall`. 피드는 `build.publish`(github, OhSorry-DP/streamcut) → `latest.yml` 에서 읽는다. 외부 브라우저로 여는 페이지는 원격 응답이 아닌 `RELEASE_URL` 상수이며 새 저장소의 릴리즈 접두사만 허용한다.

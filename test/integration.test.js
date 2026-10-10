@@ -761,6 +761,11 @@ test('global arrows seek 10/1 seconds, repeat, clamp and center an offscreen pla
   await f.key('ArrowLeft'); await f.key('ArrowRight');
   await f.key('ArrowLeft', { ctrlKey: true }); await f.key('ArrowRight', { ctrlKey: true });
   assert.deepEqual(f.seeks, [10, 20, 19, 20]);
+  // Shift 는 1분 단위(영상 길이 60초라 양 끝으로 clamp 된다), Ctrl 이 함께 눌리면 1초가 우선한다.
+  await f.key('ArrowRight', { shiftKey: true }); await f.key('ArrowLeft', { shiftKey: true });
+  assert.deepEqual(f.seeks.slice(-2), [60, 0]);
+  f.setTime(30); await f.key('ArrowRight', { shiftKey: true, ctrlKey: true });
+  assert.equal(f.seeks.at(-1), 31);
   f.setTime(2); await f.key('ArrowLeft');
   f.setTime(59); await f.key('ArrowRight', { repeat: true });
   assert.deepEqual(f.seeks.slice(-2), [0, 60]);
@@ -776,6 +781,19 @@ test('global arrows seek 10/1 seconds, repeat, clamp and center an offscreen pla
   await f.key(' ', {}, 'keydown');
   await f.key('ArrowLeft');
   assert.deepEqual(f.toggles, [true]);
+});
+
+test('[ starts a download like the button: once per press, not while typing or in the settings dialog', async t => {
+  const f = await keyboardFixture(t);
+  const event = await f.key('[');
+  assert.equal(event.defaultPrevented, true); assert.equal(f.adds, 1);
+  await f.key('[', { repeat: true }); assert.equal(f.adds, 1);
+  assert.equal((await f.key('[', {}, 'keyup')).defaultPrevented, true); assert.equal(f.adds, 1);
+  await f.key('[', { target: { tagName: 'INPUT', type: 'text' } }); assert.equal(f.adds, 1);
+  await f.doc.getElementById('settings-button').emit('click');
+  await f.key('[', { target: f.doc.getElementById('settings-tab-general') }); assert.equal(f.adds, 1);
+  await f.doc.getElementById('settings-close-button').emit('click');
+  await f.key('[', { ctrlKey: true }); assert.equal(f.adds, 2);
 });
 
 test('Space toggles once per press and suppresses focused button/summary/range defaults on both phases', async t => {

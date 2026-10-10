@@ -670,6 +670,12 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
     return tag === 'textarea' || tag === 'select' || (tag === 'input' &&
       !['range', 'button', 'submit', 'reset', 'checkbox', 'radio', 'color', 'file', 'image', 'hidden'].includes(target.type?.toLowerCase()));
   };
+  const download = attempt(async () => {
+    if (!ready) return;
+    const snapshot = copy(state);
+    snapshot.fileName = state.fileName || '';
+    unwrap(await ytcut.add({ snapshot }));
+  });
   let spaceHeld = false;
   const keyboard = event => {
     if (el('settings-dialog')?.open) { spaceHeld = false; return; }
@@ -681,7 +687,8 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
     if (!ready || textTarget(event.target) || event.altKey || event.metaKey || event.isComposing) return;
     const key = event.key?.toLowerCase();
     // 임베드가 막힌 영상(미리보기 불가)에서도 Space 는 가로채야 포커스된 버튼(예: 다운로드)이 눌려 중복 실행되지 않는다.
-    if (!space && (!previewReady || !['arrowleft', 'arrowright', 'i', 'o', 'p'].includes(key))) return;
+    // '[' 는 다운로드 버튼과 같다(미리보기 가능 여부와 무관, 버튼처럼 ready 만 필요).
+    if (!space && key !== '[' && (!previewReady || !['arrowleft', 'arrowright', 'i', 'o', 'p'].includes(key))) return;
     event.preventDefault();
     event.stopPropagation();
     if (event.type === 'keyup') return;
@@ -689,6 +696,8 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
       spaceHeld = true;
       previewing = false;
       if (!event.repeat && previewReady) Promise.resolve(player.togglePlay()).catch(message);
+    } else if (key === '[') {
+      if (!event.repeat) void download();
     } else if (key === 'p') {
       if (!event.repeat) preview();
     } else if (key === 'i' || key === 'o') {
@@ -696,7 +705,7 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
     } else {
       previewing = false;
       const duration = state.video.durationSec;
-      const sec = Math.max(0, Math.min(duration, currentTime() + (key === 'arrowleft' ? -1 : 1) * (event.ctrlKey ? 1 : 10)));
+      const sec = Math.max(0, Math.min(duration, currentTime() + (key === 'arrowleft' ? -1 : 1) * (event.ctrlKey ? 1 : event.shiftKey ? 60 : 10)));
       const span = duration / (state.timeline.zoom || 1);
       let scrollSec = state.timeline.scrollSec || 0;
       if (sec < scrollSec || sec > scrollSec + span) scrollSec = sec - span / 2;
@@ -731,12 +740,7 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
       }, 1000);
     });
   }
-  listen('download-button', 'click', attempt(async () => {
-    if (!ready) return;
-    const snapshot = copy(state);
-    snapshot.fileName = state.fileName || '';
-    unwrap(await ytcut.add({ snapshot }));
-  }));
+  listen('download-button', 'click', download);
   listen('settings-form', 'submit', attempt(async event => {
     event.preventDefault();
     if (el('settings-error')) el('settings-error').textContent = '';
