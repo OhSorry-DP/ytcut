@@ -1691,7 +1691,18 @@ test('actual server serves every renderer import with YouTube CSP and document r
   const main = await fs.readFile('main.js', 'utf8');
   assert.match(main, /format: 'mp4'/);
   const server = await startServer(path.resolve('.')); t.after(() => server.close());
-  for (const file of ['renderer/index.html', 'renderer/style.css', 'renderer/app.js', 'renderer/player.js', 'renderer/timeline-view.js', 'lib/time.js', 'lib/timeline.js']) {
+  // 렌더러가 실제로 import 하는 모든 상대 모듈이 서버에서 제공되는지 소스에서 직접 찾아 확인한다(고정 목록의 누락 방지).
+  const served = new Set(['renderer/index.html', 'renderer/style.css']);
+  const pending = ['renderer/app.js'];
+  while (pending.length) {
+    const file = pending.pop();
+    if (served.has(file)) continue;
+    served.add(file);
+    const code = await fs.readFile(file, 'utf8');
+    for (const match of code.matchAll(/from\s+'(\.{1,2}\/[^']+)'/g)) pending.push(path.posix.normalize(path.posix.join(path.posix.dirname(file), match[1])));
+  }
+  for (const file of ['renderer/player.js', 'renderer/local-player.js', 'lib/tool-errors.js']) assert.ok(served.has(file), 'expected import: ' + file);
+  for (const file of served) {
     const response = await fetch(`${server.origin}/${file}`);
     assert.equal(response.status, 200, file);
     assert.match(response.headers.get('content-security-policy'), /script-src 'self' https:\/\/www.youtube.com https:\/\/s.ytimg.com/);
