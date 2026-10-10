@@ -1,5 +1,6 @@
 const POLL_MS = 250, SEEK_MS = 120, BUFFERING_DELAY_MS = 250, LOAD_TIMEOUT_MS = 15000, RECOVER_COOLDOWN_MS = 15000;
-const FRONT_BUFFER_SEC = 180, RESUME_FRONT_SEC = 170, BACK_BUFFER_SEC = 60;
+const FRONT_BUFFER_SEC = 180, RESUME_FRONT_SEC = 170;
+const MAX_RANGES = 4, MAX_BUFFERED_SEC = 720, EVICT_BLOCK_SEC = 60, PROTECT_BACK_SEC = 60, PROTECT_FRONT_SEC = 10;
 const INIT_LIMIT = 1024 * 1024, SLICE_SIZE = 256 * 1024;
 const failure = () => new Error('대체 플레이어를 불러오지 못했습니다');
 
@@ -98,12 +99,13 @@ export function createLocalPlayer(containerId, { prepare, onTime, onError, onBuf
   container.replaceChildren(video);
   let destroyed = false, generation = 0, streamGeneration = 0, prepareGeneration = 0, stream;
   let duration = 0, videoId, path, wantPlay = false, ended = false, retried = false, failed = false, lastRecoverAt = 0;
-  let preparing = false, target, pendingTarget, seekTimer, bufferingTimer, prepareTimer, buffering = false, loadWait;
+  let preparing = false, target, pendingTarget, seekTimer, bufferingTimer, prepareTimer, buffering = false, loadWait, targetRevision = 0, requestId = 0;
   const seekWaiters = [];
   const clamp = sec => Math.min(duration, Math.max(0, Number(sec) || 0));
   const owns = s => !destroyed && stream === s && s.generation === streamGeneration && !s.dead;
   const videoOwns = s => s && owns(s) && video.src === s.url && (!video.currentSrc || video.currentSrc === s.url);
-  const actual = () => clamp((stream?.offset || 0) + (Number(video.currentTime) || 0) - (stream?.base || 0));
+  const actual = () => clamp(Number(video.currentTime) || 0);
+  const ownsRequest = (s, r) => owns(s) && s.request === r && !r.stopped;
   const getTime = () => ended ? duration : pendingTarget ?? target ?? actual();
   function stopBuffering() {
     clearTimeout(bufferingTimer); bufferingTimer = undefined;
@@ -126,15 +128,18 @@ export function createLocalPlayer(containerId, { prepare, onTime, onError, onBuf
     clearTimeout(seekTimer); seekTimer = undefined;
     for (const resolve of seekWaiters.splice(0)) resolve();
   }
-  function cancelReader(s) {
-    if (!s || s.stopped) return;
-    s.stopped = true; clearTimeout(s.timer); s.controller.abort();
-    try { Promise.resolve(s.reader?.cancel()).catch(() => {}); } catch {}
-    s.wake?.(); s.wake = undefined;
+  function cancelReader(s, reason = 'seek') {
+    const r = s?.request;
+    if (!r || r.stopped) return;
+    r.stopped = true; r.stopReason = reason; r.controller.abort();
+    clearTimeout(r.timer);
+    try { Promise.resolve(r.reader?.cancel()).catch(() => {}); } catch {}
+    r.wake?.(); r.wake = undefined;
+    clearTimeout(s.timer);
   }
   function dispose() {
     const s = stream; if (!s) return;
-    s.dead = true; clearTimeout(s.timer); cancelReader(s); s.operation?.reject(new Error('SUPERSEDED')); s.operation = undefined;
+    s.dead = true; clearTimeout(s.timer); cancelReader(s, 'dispose'); s.operation?.reject(new Error('SUPERSEDED')); s.operation = undefined;
     s.openReject?.(new Error('SUPERSEDED'));
     for (const [object, name, fn] of s.listeners) object.removeEventListener(name, fn);
     s.listeners.length = 0;
@@ -186,95 +191,148 @@ export function createLocalPlayer(containerId, { prepare, onTime, onError, onBuf
   }
   function align() {
     const s = stream;
-    if (!videoOwns(s) || failed || preparing || seekTimer !== undefined || !s.baseKnown) return;
+    if (!videoOwns(s) || failed || preparing || seekTimer !== undefined || !s.sb) return;
     const desired = pendingTarget ?? target;
     if (desired === undefined) return;
-    let relative = desired - s.offset + s.base;
-    if (covering(video.buffered, relative) < 0) {
+    let alignedTime = desired;
+    if (covering(video.buffered, alignedTime) < 0) {
       // SourceBuffer와 video의 A/V 교집합 차이만 0.1초까지 허용한다.
-      if (desired === s.offset && video.buffered.length && video.buffered.start(0) > relative) {
-        const gap = video.buffered.start(0) - relative;
+      const r = s.request;
+      const first = Array.from({ length: video.buffered.length }, (_, i) => video.buffered.start(i)).find(start => start >= r?.start);
+      if (r?.purpose === 'seek' && r.mediaAppended && desired === r.target && first !== undefined && first > alignedTime) {
+        const gap = first - alignedTime;
         if (gap > 0.1) { void recover(s); return; }
-        relative = video.buffered.start(0);
+        alignedTime = first;
       } else return;
     }
-    if (s.assigned !== relative) {
-      try { video.currentTime = relative; s.assigned = relative; } catch { return; }
+    if (s.assigned !== alignedTime) {
+      try { video.currentTime = alignedTime; s.assigned = alignedTime; } catch { return; }
     }
-    if (video.seeking || video.readyState < 3 || Math.abs(video.currentTime - relative) > 0.1) return;
-    pendingTarget = target = undefined; clearTimeout(s.timer); stopBuffering(); settleLoad(); void play(); s.wake?.();
+    if (video.seeking || video.readyState < 3 || Math.abs(video.currentTime - alignedTime) > 0.1) return;
+    pendingTarget = target = undefined; clearTimeout(s.timer); stopBuffering(); settleLoad(); void play(); s.request?.wake?.();
   }
   function listen(s, object, name, fn) {
     const guarded = () => { if (owns(s)) fn(); };
     object.addEventListener(name, guarded); s.listeners.push([object, name, guarded]);
   }
-  function operation(s, kind, bytesOrEnd) {
-    if (!owns(s) || s.stopped) return Promise.reject(new Error('SUPERSEDED'));
+  function enqueue(s, r, task) {
+    const run = s.queue.then(() => {
+      if (!owns(s) || (r && !ownsRequest(s, r))) throw new Error('SUPERSEDED');
+      return task();
+    });
+    s.queue = run.catch(() => {});
+    return run;
+  }
+  function operation(s, kind, value) {
+    if (!owns(s)) return Promise.reject(new Error('SUPERSEDED'));
     return new Promise((resolve, reject) => {
       if (s.sb.updating || s.operation) { reject(failure()); return; }
       s.operation = { resolve, reject };
       try {
-        if (kind === 'append') s.sb.appendBuffer(bytesOrEnd); else s.sb.remove(0, bytesOrEnd);
+        if (kind === 'append') s.sb.appendBuffer(value); else s.sb.remove(value.start, value.end);
       } catch (error) { s.operation = undefined; reject(error); }
     });
   }
+  function snapshot(s) {
+    s.ranges = Array.from({ length: s.sb.buffered.length }, (_, i) => ({ start: s.sb.buffered.start(i), end: s.sb.buffered.end(i) }));
+    return s.ranges;
+  }
+  const total = ranges => ranges.reduce((sum, range) => sum + range.end - range.start, 0);
+  const overLimit = ranges => ranges.length > MAX_RANGES || total(ranges) > MAX_BUFFERED_SEC;
   function removable(s) {
-    let end = Math.max(0, video.currentTime - BACK_BUFFER_SEC);
-    const desired = pendingTarget ?? target;
-    if (desired !== undefined) end = Math.min(end, Math.max(0, desired - s.offset + s.base));
-    for (let i = 0; i < s.sb.buffered.length; i++) if (s.sb.buffered.start(i) < end) return end;
-    return 0;
+    const desired = pendingTarget ?? target, anchor = desired ?? actual();
+    const windows = [actual(), ...(desired === undefined ? [] : [desired])].map(t => ({ start: Math.max(0, t - PROTECT_BACK_SEC), end: t + PROTECT_FRONT_SEC }));
+    const wholeRanges = [], blocks = [];
+    for (const range of snapshot(s)) {
+      const protectedRange = windows.some(w => w.start < range.end && range.start < w.end);
+      const landing = s.request?.purpose === 'seek' && !s.request.stopped && desired !== undefined && Math.abs(desired - s.request.start) <= 0.001 && range.start <= s.request.start && s.request.start < range.end;
+      if (!protectedRange && !landing && s.ranges.length > 1) wholeRanges.push(range);
+      else {
+        // 양 끝만 깎아서 가운데 구멍으로 범위 수가 늘지 않게 한다.
+        const overlapping = windows.filter(w => w.start < range.end && range.start < w.end);
+        let left = overlapping.length ? Math.min(...overlapping.map(w => w.start)) : range.end;
+        let right = overlapping.length ? Math.max(...overlapping.map(w => w.end)) : range.start;
+        if (landing) { left = Math.min(left, s.request.start); right = Math.max(right, s.request.start + PROTECT_FRONT_SEC); }
+        if (range.start < left) blocks.push({ start: range.start, end: Math.min(left, range.end, range.start + EVICT_BLOCK_SEC) });
+        if (range.end > right) blocks.push({ start: Math.max(right, range.start, range.end - EVICT_BLOCK_SEC), end: range.end });
+      }
+    }
+    const distance = r => Math.max(r.start - anchor, anchor - r.end, 0);
+    return (wholeRanges.length ? wholeRanges : blocks).filter(r => r.end > r.start).sort((a, b) => distance(b) - distance(a) || a.start - b.start);
   }
-  async function prune(s) {
-    const end = removable(s); if (end > 0) await operation(s, 'remove', end);
-    return end > 0;
+  async function pruneNow(s, quota = false) {
+    let removed = false;
+    while (quota || overLimit(snapshot(s))) {
+      const candidate = removable(s)[0]; if (!candidate) return removed;
+      const before = total(s.ranges);
+      await operation(s, 'remove', candidate);
+      if (total(snapshot(s)) >= before) throw failure();
+      removed = true;
+      if (quota) break;
+    }
+    return removed;
   }
-  async function append(s, bytes) {
+  function prune(s) { return enqueue(s, undefined, () => pruneNow(s)); }
+  async function append(s, r, bytes, isInit = false) {
     for (let at = 0; at < bytes.length; at += SLICE_SIZE) {
       const slice = bytes.subarray(at, Math.min(at + SLICE_SIZE, bytes.length));
-      try { await operation(s, 'append', slice); } catch (error) {
-        if (error.name !== 'QuotaExceededError' || !owns(s) || s.stopped) throw error;
-        if (!await prune(s)) throw error;
-        await operation(s, 'append', slice);
-      }
-      if (!owns(s) || s.stopped) throw new Error('SUPERSEDED');
-      if (!s.baseKnown && s.sb.buffered.length) { s.base = s.sb.buffered.start(0); s.baseKnown = true; }
+      await enqueue(s, r, async () => {
+        try { await operation(s, 'append', slice); } catch (error) {
+          if (error.name !== 'QuotaExceededError' || !ownsRequest(s, r)) throw error;
+          if (!await pruneNow(s, true)) throw error;
+          if (!ownsRequest(s, r)) throw new Error('SUPERSEDED');
+          await operation(s, 'append', slice);
+        }
+        snapshot(s);
+      });
+      if (!ownsRequest(s, r)) throw new Error('SUPERSEDED');
+      if (!isInit) r.mediaAppended = true;
       align();
+      await prune(s);
     }
   }
   function front(s) {
-    const i = covering(video.buffered, video.currentTime);
-    return i < 0 ? 0 : video.buffered.end(i) - video.currentTime;
+    const time = pendingTarget ?? target ?? actual(), i = covering(video.buffered, time);
+    return i < 0 ? 0 : video.buffered.end(i) - time;
   }
-  async function waitCap(s) {
-    if (!s.capped && front(s) < FRONT_BUFFER_SEC) return;
-    s.capped = true;
-    if (front(s) > FRONT_BUFFER_SEC && !s.overshootReported) {
-      s.overshootReported = true; console.debug('MSE fragment buffer cap overshoot', front(s) - FRONT_BUFFER_SEC);
+  async function waitCap(s, r) {
+    if (!r.capped && front(s) < FRONT_BUFFER_SEC && !overLimit(snapshot(s))) return;
+    r.capped = true;
+    while (ownsRequest(s, r) && (front(s) > RESUME_FRONT_SEC || overLimit(snapshot(s)))) {
+      await new Promise(resolve => { r.wake = resolve; }); r.wake = undefined;
+      if (ownsRequest(s, r)) await prune(s);
     }
-    while (owns(s) && !s.stopped && front(s) > RESUME_FRONT_SEC) {
-      await new Promise(resolve => { s.wake = resolve; }); s.wake = undefined;
-      if (owns(s) && !s.stopped) await prune(s);
-    }
-    s.capped = false;
+    r.capped = false;
   }
-  async function consume(s) {
+  async function consume(s, r) {
+    // 보충 요청은 재생 준비가 아니라 실제 네트워크 대기만 제한한다.
+    const receiving = async task => {
+      if (r.purpose === 'refill') r.timer = setTimeout(() => { if (ownsRequest(s, r)) void recover(s); }, LOAD_TIMEOUT_MS);
+      try { return await task(); } finally { clearTimeout(r.timer); }
+    };
     try {
-      const response = await fetch(`${path}?start=${s.offset.toFixed(3)}`, { signal: s.controller.signal });
-      if (!owns(s) || s.stopped) { try { await response.body?.cancel(); } catch {} return; }
+      const response = await receiving(() => fetch(`${path}?start=${r.start.toFixed(3)}`, { signal: r.controller.signal }));
+      if (!ownsRequest(s, r)) { try { await response.body?.cancel(); } catch {} return; }
       if (!response.ok || !response.body) throw failure();
-      s.reader = response.body.getReader();
+      r.reader = response.body.getReader();
       let init = new Uint8Array(0), info;
-      while (owns(s) && !s.stopped) {
-        if (s.sb) { await prune(s); await waitCap(s); }
-        if (!owns(s) || s.stopped) return;
-        const result = await s.reader.read();
-        if (!owns(s) || s.stopped) return;
+      while (ownsRequest(s, r)) {
+        if (s.sb && info) { await prune(s); await waitCap(s, r); }
+        if (!ownsRequest(s, r)) return;
+        const result = await receiving(() => r.reader.read());
+        if (!ownsRequest(s, r)) return;
         if (result.done) {
           if (!info) throw failure();
           await prune(s);
-          if (owns(s) && !s.stopped && !s.sb.updating && s.ms.readyState === 'open') {
-            s.ms.endOfStream(); s.eof = true;
+          if (ownsRequest(s, r)) {
+            if (r.purpose === 'refill') {
+              const index = covering(video.buffered, r.start);
+              const progress = index < 0 ? 0 : video.buffered.end(index) - r.start;
+              s.noProgress = progress < 0.001 ? (s.lastRefillStart === r.start ? s.noProgress + 1 : 1) : 0;
+              s.lastRefillStart = r.start;
+              if (s.noProgress >= 2) throw failure();
+            }
+            r.eof = true; r.stopped = true; r.stopReason = 'eof';
           }
           return;
         }
@@ -287,53 +345,79 @@ export function createLocalPlayer(containerId, { prepare, onTime, onError, onBuf
           if (!info) { if (init.length >= INIT_LIMIT) throw failure(); continue; }
           if (!MediaSource.isTypeSupported(info.mime)) throw failure();
           await s.open;
-          if (!owns(s) || s.stopped) return;
-          s.sb = s.ms.addSourceBuffer(info.mime); s.sb.mode = 'segments';
-          listen(s, s.sb, 'updateend', () => {
-            const op = s.operation; s.operation = undefined; op?.resolve(); align(); s.wake?.();
+          if (!ownsRequest(s, r)) return;
+          await enqueue(s, r, () => {
+            if (s.ms.readyState !== 'open' || (s.mime && s.mime !== info.mime)) throw failure();
+            if (!s.sb) {
+              s.mime = info.mime; s.sb = s.ms.addSourceBuffer(info.mime); s.sb.mode = 'segments';
+              listen(s, s.sb, 'updateend', () => {
+                if (s.intentionalAbort) return;
+                const op = s.operation; s.operation = undefined; snapshot(s); op?.resolve();
+              });
+              for (const name of ['error', 'abort']) listen(s, s.sb, name, () => {
+                if (name === 'abort' && s.intentionalAbort) return;
+                const op = s.operation; s.operation = undefined; op?.reject(failure()); void recover(s);
+              });
+            } else {
+              s.intentionalAbort = true;
+              try { s.sb.abort(); } finally { s.intentionalAbort = false; }
+            }
+            s.sb.appendWindowStart = 0; s.sb.appendWindowEnd = Infinity; s.sb.timestampOffset = r.start;
           });
-          for (const name of ['error', 'abort']) listen(s, s.sb, name, () => {
-            const op = s.operation; s.operation = undefined; op?.reject(failure()); void recover(s);
-          });
-          await append(s, init.subarray(0, info.end));
-          await append(s, init.subarray(info.end)); init = undefined;
-          await append(s, bytes.subarray(take));
-        } else await append(s, bytes);
+          await append(s, r, init.subarray(0, info.end), true);
+          await append(s, r, init.subarray(info.end)); init = undefined;
+          await append(s, r, bytes.subarray(take));
+        } else await append(s, r, bytes);
       }
-    } catch { if (owns(s) && !s.stopped) void recover(s); }
+    } catch { if (ownsRequest(s, r)) void recover(s); }
   }
-  function openStream(sec) {
-    dispose(); streamGeneration++;
-    target = clamp(sec); pendingTarget = undefined; ended = false; video.pause();
-    const ms = new MediaSource();
-    const s = { ms, offset: target, base: 0, baseKnown: false, generation: streamGeneration,
-      controller: new AbortController(), listeners: [], url: URL.createObjectURL(ms) };
-    stream = s;
-    s.timer = setTimeout(() => { if (owns(s)) void recover(s); }, LOAD_TIMEOUT_MS);
-    s.open = new Promise((resolve, reject) => { s.openReject = reject; listen(s, ms, 'sourceopen', resolve); });
-    // 교체가 sourceopen보다 빠를 때의 reject도 처리한다.
-    s.open.catch(() => {});
-    listen(s, ms, 'sourceclose', () => { if (!s.eof && !s.stopped) void recover(s); });
-    video.src = s.url; video.load(); startBuffering();
-    void consume(s);
+  function armReadiness(s) {
+    clearTimeout(s.timer); const revision = targetRevision;
+    s.timer = setTimeout(() => { if (owns(s) && revision === targetRevision && target !== undefined) void recover(s); }, LOAD_TIMEOUT_MS);
+  }
+  function openStream(sec, purpose = 'seek') {
+    if (purpose === 'seek' && stream?.sb && covering(video.buffered, sec) >= 0) { target = sec; align(); return; }
+    cancelReader(stream);
+    if (purpose === 'seek') { target = clamp(sec); pendingTarget = undefined; ended = false; video.pause(); }
+    let s = stream;
+    if (!s) {
+      streamGeneration++; const ms = new MediaSource();
+      s = { ms, generation: streamGeneration, listeners: [], url: URL.createObjectURL(ms), queue: Promise.resolve(), ranges: [] };
+      stream = s;
+      s.open = new Promise((resolve, reject) => { s.openReject = reject; listen(s, ms, 'sourceopen', resolve); });
+      s.open.catch(() => {});
+      listen(s, ms, 'sourceclose', () => { void recover(s); });
+      video.src = s.url; video.load();
+    }
+    const r = { id: ++requestId, target: clamp(sec), start: Number(clamp(sec).toFixed(3)), purpose, controller: new AbortController() };
+    s.request = r; s.assigned = undefined;
+    if (purpose === 'seek') { armReadiness(s); startBuffering(); }
+    void consume(s, r).finally(() => clearTimeout(r.timer));
   }
   function endpoint() {
     prepareGeneration++; preparing = false; clearTimeout(prepareTimer);
-    cancelReader(stream); settleSeeks(); pendingTarget = target = undefined;
+    targetRevision++; cancelReader(stream, 'endpoint'); clearTimeout(stream?.timer); settleSeeks(); pendingTarget = target = undefined;
     ended = true; wantPlay = false; video.pause(); stopBuffering(); settleLoad(); onTime?.(duration);
   }
   function maintenance() {
     const s = stream;
     if (!videoOwns(s)) return;
     align();
-    s.wake?.();
-    if (s.stopped && !ended && !failed && !preparing && target === undefined && pendingTarget === undefined && front(s) <= 10) openStream(actual());
+    s.request?.wake?.();
+    if (!ended && target === undefined && pendingTarget === undefined && actual() >= duration - 0.1) { endpoint(); return; }
+    if (s.sb && !s.pruning) {
+      s.pruning = true; void prune(s).catch(() => { if (owns(s)) void recover(s); }).finally(() => { s.pruning = false; });
+    }
+    if (s.request?.stopped && wantPlay && !ended && !failed && !preparing && target === undefined && pendingTarget === undefined && front(s) <= 10) {
+      const i = covering(video.buffered, actual());
+      openStream(i < 0 ? actual() : video.buffered.end(i), 'refill');
+    }
   }
   const listeners = {};
   for (const name of ['loadedmetadata', 'canplay', 'playing', 'seeked', 'timeupdate']) listeners[name] = maintenance;
-  listeners.error = () => { if (videoOwns(stream) && !stream.stopped) void recover(stream); };
+  listeners.error = () => { if (videoOwns(stream)) void recover(stream); };
   listeners.ended = () => {
-    if (videoOwns(stream) && stream.eof && !video.seeking && target === undefined && pendingTarget === undefined) endpoint();
+    if (videoOwns(stream) && !video.seeking && target === undefined && pendingTarget === undefined && actual() >= duration - 0.1) endpoint();
   };
   listeners.click = () => { void api.togglePlay(); };
   for (const [name, fn] of Object.entries(listeners)) video.addEventListener(name, fn);
@@ -341,7 +425,7 @@ export function createLocalPlayer(containerId, { prepare, onTime, onError, onBuf
   const api = {
     load(metadata, timeSec = 0) {
       if (destroyed) return Promise.reject(new Error('SUPERSEDED'));
-      generation++; clearTimeout(prepareTimer); stopBuffering(); settleSeeks(); settleLoad(new Error('SUPERSEDED')); dispose();
+      generation++; targetRevision++; clearTimeout(prepareTimer); stopBuffering(); settleSeeks(); settleLoad(new Error('SUPERSEDED')); dispose();
       videoId = metadata.videoId; duration = Math.max(0, Number(metadata.durationSec) || 0);
       target = clamp(timeSec); pendingTarget = undefined; path = undefined;
       wantPlay = ended = retried = failed = preparing = false;
@@ -353,14 +437,14 @@ export function createLocalPlayer(containerId, { prepare, onTime, onError, onBuf
     },
     seek(sec) {
       if (destroyed || failed) return Promise.resolve();
-      const next = clamp(sec); ended = false;
+      const next = clamp(sec); ended = false; targetRevision++;
       if (next === duration) { endpoint(); return Promise.resolve(); }
-      const s = stream, relative = next - (s?.offset || 0) + (s?.base || 0);
+      const s = stream;
       pendingTarget = next;
-      if (!preparing && s?.baseKnown && owns(s) && covering(video.buffered, relative) >= 0) {
+      if (!preparing && s?.sb && owns(s) && covering(video.buffered, next) >= 0) {
         settleSeeks(); stopBuffering(); target = next; s.assigned = undefined;
-        clearTimeout(s.timer); s.timer = setTimeout(() => { if (owns(s)) void recover(s); }, LOAD_TIMEOUT_MS);
-        align(); s.wake?.();
+        armReadiness(s);
+        align(); s.request?.wake?.();
         return Promise.resolve();
       }
       cancelReader(s); video.pause();

@@ -81,7 +81,7 @@ function fixture(t, options = {}) {
   const oldCreate = URL.createObjectURL, oldRevoke = URL.revokeObjectURL;
   const video = new FakeVideo(), errors = [], times = [], buffering = [], sources = [], fetches = [], live = new Set(), revoked = [];
   let prepareCalls = 0, auto = options.auto !== false, supported = true;
-  const absolute = options.absolute === true, log = [], mediaAppendIndex = new Map();
+  const absolute = options.absolute !== false, log = [], mediaAppendIndex = new Map();
   class SourceBuffer extends Events {
     mode = ''; _timestampOffset = 0; updating = false; ranges = []; buffered = rangesOf(this);
     _appendWindowStart = 0; _appendWindowEnd = Infinity;
@@ -97,8 +97,8 @@ function fixture(t, options = {}) {
       assert.equal(this.updating, false); this.attempts.push(Uint8Array.from(bytes));
       if (this.quota > 0) { this.quota--; throw Object.assign(new Error('quota'), { name: 'QuotaExceededError' }); }
       this.calls.push(['append', Uint8Array.from(bytes)]);
-      const appendCount = this.calls.filter(call => call[0] === 'append').length;
-      log.push([absolute && appendCount <= 2 ? 'init' : 'append', bytes.length]); this.updating = true; this.operation = 'append';
+      const isInit = bytes.length > 8 && String.fromCharCode(...bytes.subarray(4, 8)) === 'ftyp';
+      log.push([isInit ? 'init' : 'append', bytes.length]); this.updating = true; this.operation = 'append';
       if (auto) Promise.resolve().then(() => this.finish());
     }
     remove(start, end) {
@@ -108,14 +108,15 @@ function fixture(t, options = {}) {
     finish(ranges) {
       if (!this.updating) return;
       if (this.operation === 'remove') {
-        const [, start, end] = this.calls.at(-1); this.ranges = subtractRanges(this.ranges, start, end); video.ranges = subtractRanges(video.ranges, start, end);
+        const [, requestedStart, requestedEnd] = this.calls.at(-1);
+        const [start, end] = options.removeResult?.(requestedStart, requestedEnd) ?? [requestedStart, requestedEnd];
+        this.ranges = subtractRanges(this.ranges, start, end); video.ranges = subtractRanges(video.ranges, start, end);
       } else if (ranges) { this.ranges = unionRanges(ranges); video.ranges = unionRanges(ranges); }
       else if (absolute && this.operation === 'append') {
-        const count = mediaAppendIndex.get(this) || 0; mediaAppendIndex.set(this, count + 1);
-        if (count < 2) { this.parserFragments.push({ init: true, index: count }); this.updating = false; this.emit('updateend'); return; }
-        const index = count - 2;
-        const script = typeof options.mediaScript === 'function' ? options.mediaScript({ source: sources[this.id], sb: this, index }) : options.mediaScript;
-        const item = script?.samples?.[index] ?? script?.fragments?.[index];
+        if (this.calls.at(-1)[1].length > 8 && String.fromCharCode(...this.calls.at(-1)[1].subarray(4, 8)) === 'ftyp') { this.parserFragments.push({ init: true }); this.updating = false; this.emit('updateend'); return; }
+        const index = mediaAppendIndex.get(this) || 0; mediaAppendIndex.set(this, index + 1);
+        const script = typeof options.mediaScript === 'function' ? options.mediaScript({ source: sources[this.id - 1], sb: this, index }) : options.mediaScript;
+        const item = script?.samples?.[index] ?? script?.fragments?.[index] ?? (script ? undefined : { video: [[options.base || 0, (options.base || 0) + 5]] });
         if (item) {
           const sampleRange = item.start !== undefined && item.end !== undefined ? [[item.start, item.end]] : [];
           const tracks = item.tracks || { audio: item.audio || [], video: item.video || (item.track === 'video' ? sampleRange : []) };
@@ -131,12 +132,12 @@ function fixture(t, options = {}) {
         this.ranges = [[options.base || 0, (options.base || 0) + 5]]; video.ranges = this.ranges.map(range => [...range]);
       }
       if (this.videoRanges) video.ranges = unionRanges(this.videoRanges);
-      if (auto) video.readyState = 3;
+      if (auto && !video.freezeReadiness) video.readyState = 3;
       this.updating = false; this.emit('updateend');
     }
     fail(name = 'error', { late = false } = {}) { this.emit(name); if (late) { this.updating = false; this.emit('updateend'); } }
     finishUpdate() { this.finish(); }
-    abort() { assert.equal(this.updating, false); log.push(['abort']); this.parserFragments = []; this.appendWindowStart = 0; this.appendWindowEnd = Infinity; if (options.abortEvents !== false) { this.emit('abort'); this.emit('updateend'); } }
+    abort() { assert.equal(this.updating, false); log.push(['abort']); this.parserFragments = []; mediaAppendIndex.set(this, 0); this.appendWindowStart = 0; this.appendWindowEnd = Infinity; if (options.abortEvents !== false) { this.emit('abort'); this.emit('updateend'); } }
   }
   class MS extends Events {
     static checks = [];
@@ -163,7 +164,7 @@ function fixture(t, options = {}) {
           return value;
         } finally { request.active--; }
       },
-      cancel() { request.cancels++; request.cancelled = true; request.push({ done: true }); return Promise.resolve(); },
+      cancel() { request.cancels++; request.cancelled = true; if (!options.deferCancelRead) request.push({ done: true }); return Promise.resolve(); },
     };
     const bytes = options.init || initBytes(options);
     const cuts = (options.networkSplit || options.split) ? (Array.isArray(options.networkSplit) ? [...options.networkSplit, bytes.length] : [3, 9, 17, 43, bytes.length]) : [bytes.length]; let previous = 0;
@@ -185,33 +186,33 @@ function fixture(t, options = {}) {
     for (const [name, value] of saved) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; }
     URL.createObjectURL = oldCreate; URL.revokeObjectURL = oldRevoke;
   });
-  const f = { player, video, errors, times, buffering, sources, fetches, live, revoked, MS,
+  const f = { player, video, errors, times, buffering, sources, fetches, live, revoked, MS, log,
     get prepares() { return prepareCalls; }, get sb() { return sources.at(-1)?.sb; },
     setAuto(value) { auto = value; }, setSupported(value) { supported = value; },
     start(start = 10, durationSec = 1000) {
       const pending = player.load({ videoId: 'abcdefghijk', durationSec }, start); pending.catch(() => {}); return pending;
     },
-    async ready() { await flush(); const latest = sources.at(-1); if (latest && (!absolute || latest.readyState === 'closed')) latest.open(); await flush(); video.emit('canplay'); await flush(); },
+    async ready() { await flush(); const latest = sources.at(-1); if (latest && (!absolute || latest.readyState === 'closed')) latest.open(); await flush(); video.freezeReadiness = false; video.readyState = 3; video.emit('canplay'); await flush(); },
     async load(start = 10, duration = 1000) { const pending = f.start(start, duration); await f.ready(); await pending; },
     range(ranges, current = video.currentTime) { f.sb.ranges = ranges.map(range => [...range]); video.ranges = ranges.map(range => [...range]); video._currentTime = current; },
-    async dispatch(sec) { const pending = player.seek(sec); t.mock.timers.tick(120); await pending; await flush(); },
+    async dispatch(sec) { if (!video.ranges.some(([a, b]) => a <= sec && sec < b)) { video.freezeReadiness = true; video.readyState = 0; } const pending = player.seek(sec); t.mock.timers.tick(120); await pending; await flush(); },
     async push(bytes) { fetches.at(-1).push(bytes instanceof Error ? bytes : bytes === null ? { done: true } : { value: bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes), done: false }); await flush(); },
   };
   return f;
 }
 
-test('local time uses stream offset and measured buffered origin and polls every 250ms', async t => {
-  const f = fixture(t, { base: 12.345 }); await f.load(70);
+test('local time uses absolute timestamps without subtracting buffered origin and polls every 250ms', async t => {
+  const f = fixture(t, { base: 0.05 }); await f.load(70);
   assert.equal(f.fetches[0].url, '/preview/token.mp4?start=70.000'); assert.match(f.video.src, /^blob:/);
-  assert.equal(f.video.currentTime, 12.345); assert.equal(f.player.getTime(), 70);
-  f.video._currentTime = 26.595; assert.equal(f.player.getTime(), 84.25);
+  assert.equal(f.video.currentTime, 70.05); assert.equal(f.player.getTime(), 70.05);
+  f.video._currentTime = 84.25; assert.equal(f.player.getTime(), 84.25);
   t.mock.timers.tick(249); assert.deepEqual(f.times, []); t.mock.timers.tick(1); assert.deepEqual(f.times, [84.25]);
 });
-test('buffered seek changes time only; outside seek replaces source and preserves playback and play rejection', async t => {
+test('buffered seek changes time only; outside seek reuses source and preserves playback and play rejection', async t => {
   const f = fixture(t); await f.load(10); f.range([[0, 40]]); await f.player.togglePlay();
-  await f.player.seek(25); assert.equal(f.video.currentTime, 15); assert.equal(f.fetches.length, 1);
+  await f.player.seek(25); assert.equal(f.video.currentTime, 25); assert.equal(f.fetches.length, 1);
   await f.dispatch(70.1234); assert.equal(f.fetches.at(-1).url, '/preview/token.mp4?start=70.123'); assert.equal(f.video.paused, true);
-  await f.ready(); assert.equal(f.video.currentTime, 0); assert.equal(f.player.getTime(), 70.1234); assert.equal(f.video.paused, false);
+  await f.ready(); assert.equal(f.video.currentTime, 70.1234); assert.equal(f.player.getTime(), 70.1234); assert.equal(f.video.paused, false);
   await f.player.pause(); await f.dispatch(5); await f.ready(); assert.equal(f.player.getTime(), 5); assert.equal(f.video.paused, true);
   f.video.rejectPlay = true; const pending = f.player.seekAndPlay(80); t.mock.timers.tick(120); await pending; await f.ready();
   assert.equal(f.errors.length, 1); assert.equal(f.errors[0].message, '대체 플레이어를 불러오지 못했습니다'); assert.equal(f.video.paused, true);
@@ -222,7 +223,7 @@ test('rapid seeks accumulate 20 times in both directions, clamp endpoint, and de
   for (let i = 0; i < 20; i++) { pending.push(f.player.seek(f.player.getTime() + 10)); assert.equal(f.player.getTime(), 70 + 10 * i); }
   t.mock.timers.tick(119); await flush(); assert.equal(f.fetches.length, 1); assert.equal(f.fetches[0].signal.aborted, true);
   t.mock.timers.tick(1); await Promise.all(pending); await flush(); assert.equal(f.fetches.length, 2); assert.equal(f.fetches.at(-1).url, '/preview/token.mp4?start=260.000'); assert.equal(f.player.getTime(), 260);
-  await f.ready(); await f.load(500); f.range([[0, 40]]); pending = [];
+  await f.ready(); await f.load(500); f.range([[500, 540]]); pending = [];
   for (let i = 0; i < 20; i++) { pending.push(f.player.seek(f.player.getTime() - 10)); assert.equal(f.player.getTime(), 490 - 10 * i); }
   t.mock.timers.tick(120); await Promise.all(pending); await flush(); assert.equal(f.fetches.at(-1).url, '/preview/token2.mp4?start=300.000'); await f.ready();
   await f.load(60, 100); const base = f.fetches.length; pending = [];
@@ -234,7 +235,7 @@ test('rapid seeks accumulate 20 times in both directions, clamp endpoint, and de
   t.mock.timers.tick(108); await Promise.all(pending); await flush(); assert.equal(f.fetches.length, count + 1); assert.equal(f.fetches.at(-1).url, '/preview/token4.mp4?start=280.000');
 });
 test('media error prepares once at actual position and reports only the second failure', async t => {
-  const f = fixture(t); await f.load(10); f.video._currentTime = 17;
+  const f = fixture(t); await f.load(10); f.video._currentTime = 27;
   f.video.emit('error'); await flush(); assert.equal(f.prepares, 2); assert.equal(f.fetches.at(-1).url, '/preview/token2.mp4?start=27.000'); await f.ready();
   assert.equal(f.player.getTime(), 27); f.video.emit('error'); await flush(); assert.equal(f.prepares, 2); assert.equal(f.errors.length, 1); assert.equal(f.video.paused, true);
 });
@@ -253,8 +254,8 @@ test('destroy removes source and ignores late prepare results and timers', async
 });
 test('ended pauses and reports metadata duration and EOF buffered seek needs no fetch', async t => {
   const f = fixture(t); await f.load(70); await f.player.togglePlay(); await f.push(null);
-  assert.equal(f.sources[0].eos, 1); await f.player.seek(72); assert.equal(f.fetches.length, 1);
-  f.video.emit('ended'); assert.equal(f.player.getTime(), 1000); assert.equal(f.video.paused, true); assert.equal(f.times.at(-1), 1000);
+  assert.equal(f.sources[0].eos, 0); await f.player.seek(72); assert.equal(f.fetches.length, 1);
+  f.video.emit('ended'); assert.equal(f.player.getTime(), 72); f.video._currentTime = 1000; f.video.emit('timeupdate'); assert.equal(f.player.getTime(), 1000); assert.equal(f.video.paused, true); assert.equal(f.times.at(-1), 1000);
   t.mock.timers.tick(250); assert.equal(f.times.at(-1), 1000);
 });
 test('load targets clamp, retain fractional offsets, and exact endpoint avoids empty fetch', async t => {
@@ -262,7 +263,7 @@ test('load targets clamp, retain fractional offsets, and exact endpoint avoids e
   for (const target of [-5, 0, 10, 29.999, 30, 30.001, 70.1234, 99.5]) {
     await f.load(target, 100); const clamped = Math.max(0, target);
     assert.equal(f.fetches.at(-1).url, `/preview/token${f.prepares === 1 ? '' : f.prepares}.mp4?start=${clamped.toFixed(3)}`);
-    assert.equal(f.video.currentTime, 0); assert.equal(f.player.getTime(), clamped);
+    assert.equal(f.video.currentTime, clamped); assert.equal(f.player.getTime(), clamped);
   }
   const count = f.fetches.length; await f.load(110, 100); assert.equal(f.player.getTime(), 100); assert.equal(f.fetches.length, count);
   await f.dispatch(90); await f.ready(); assert.equal(f.player.getTime(), 90);
@@ -271,7 +272,7 @@ test('buffering waits 250ms and clears only after covered, aligned readiness', a
   const f = fixture(t); await f.load(); f.setAuto(false); await f.dispatch(70);
   t.mock.timers.tick(249); assert.deepEqual(f.buffering, []); t.mock.timers.tick(1); assert.deepEqual(f.buffering, [true]);
   f.video.readyState = 3; f.video.emit('canplay'); f.video.emit('playing'); assert.deepEqual(f.buffering, [true]);
-  f.sources.at(-1).open(); await flush(); f.sb.finish(); await flush(); f.sb.finish([[0, 5]]); await flush();
+  f.sources.at(-1).open(); await flush(); f.sb.finish(); await flush(); f.sb.finish([[70, 75]]); await flush();
   assert.deepEqual(f.buffering, [true, false]); assert.equal(f.player.getTime(), 70);
 });
 test('immediate and buffered seeks never notify buffering even on waiting', async t => {
@@ -288,14 +289,14 @@ test('destroy before buffering delay never emits a stale true', async t => {
   const f = fixture(t); await f.load(); await f.dispatch(80); f.player.destroy(); t.mock.timers.tick(16000); assert.deepEqual(f.buffering, []);
 });
 test('backward seeks inside buffered stream are immediate and preserve source', async t => {
-  const f = fixture(t); await f.load(40); f.range([[0, 100]], 30); await f.player.seek(69); assert.equal(f.video.currentTime, 29);
-  await f.player.seek(60); assert.equal(f.video.currentTime, 20); assert.equal(f.player.getTime(), 60); t.mock.timers.tick(500); assert.equal(f.fetches.length, 1); assert.deepEqual(f.buffering, []);
+  const f = fixture(t); await f.load(40); f.range([[40, 140]], 70); await f.player.seek(69); assert.equal(f.video.currentTime, 69);
+  await f.player.seek(60); assert.equal(f.video.currentTime, 60); assert.equal(f.player.getTime(), 60); t.mock.timers.tick(500); assert.equal(f.fetches.length, 1); assert.deepEqual(f.buffering, []);
 });
 test('load waits for metadata, coverage, async setter completion and readiness in order', async t => {
   const f = fixture(t, { auto: false }); f.video.delayedSeek = true; f.video.throwBeforeMetadata = true;
   let done = false; const pending = f.start(70).then(() => { done = true; }); await flush();
   f.video.emit('canplay'); f.video.emit('playing'); assert.equal(done, false); assert.equal(f.video.assignments.length, 0);
-  f.sources[0].open(); await flush(); f.sb.finish(); await flush(); f.sb.finish([[0, 5]]); await flush();
+  f.sources[0].open(); await flush(); f.sb.finish(); await flush(); f.sb.finish([[70, 75]]); await flush();
   assert.equal(done, false); assert.equal(f.video.assignments.length, 0); t.mock.timers.tick(250); assert.deepEqual(f.buffering, [true]);
   f.video.readyState = 1; f.video.emit('loadedmetadata'); assert.equal(f.video.seeking, true); assert.equal(f.player.getTime(), 70);
   f.video.emit('canplay'); f.video.emit('playing'); assert.equal(done, false); assert.equal(f.video.paused, true);
@@ -310,14 +311,14 @@ test('seekAndPlay stays paused until ready and honors the latest pause or toggle
   f.video.completeSeek(); await flush(); assert.equal(f.video.paused, false); assert.equal(f.player.getTime(), 800);
 });
 test('new seeks replace stale targets and cancellation returns to buffer without reusing aborted reader', async t => {
-  const f = fixture(t); await f.load(100); f.range([[0, 180]], 60); f.video.delayedSeek = true;
+  const f = fixture(t); await f.load(100); f.range([[100, 280]], 160); f.video.delayedSeek = true;
   const pending = [];
   for (let i = 0; i < 20; i++) { pending.push(f.player.seek(f.player.getTime() + 1)); assert.equal(f.player.getTime(), 161 + i); }
-  assert.equal(f.video.currentTime, 60); assert.equal(f.video.seekTarget, 80); assert.equal(f.fetches.length, 1); f.video.completeSeek(); await Promise.all(pending);
-  assert.equal(f.video.currentTime, 80); assert.equal(f.player.getTime(), 180);
+  assert.equal(f.video.currentTime, 160); assert.equal(f.video.seekTarget, 180); assert.equal(f.fetches.length, 1); f.video.completeSeek(); await Promise.all(pending);
+  assert.equal(f.video.currentTime, 180); assert.equal(f.player.getTime(), 180);
   const outside = f.player.seek(900); assert.equal(f.fetches[0].signal.aborted, true); const reads = f.fetches[0].reads;
   await f.player.seek(175); await outside; f.video.completeSeek(); t.mock.timers.tick(120); await flush(); assert.equal(f.fetches.length, 1); assert.equal(f.player.getTime(), 175);
-  f.video._currentTime = 175; f.video.emit('timeupdate'); await flush(); assert.equal(f.fetches.length, 2); assert.equal(f.fetches[0].reads, reads); assert.equal(f.prepares, 1); assert.deepEqual(f.errors, []);
+  await f.player.togglePlay(); f.video._currentTime = 275; f.video.emit('timeupdate'); await flush(); assert.equal(f.fetches.length, 2); assert.equal(f.fetches[0].reads, reads); assert.equal(f.prepares, 1); assert.deepEqual(f.errors, []);
 });
 test('errors recover from requested targets, include recovery bursts, and stop on second failure', async t => {
   let resolve; const f = fixture(t, { prepare: (_id, calls) => calls === 2 ? new Promise(done => { resolve = done; }) : { path: '/preview/token.mp4' } });
@@ -339,7 +340,7 @@ test('superseded loads and destroy invalidate late events timers and pending see
 
 test('nested init parser honors split box boundaries, real AVC profile and AVC-only', async t => {
   const f = fixture(t, { split: true, profile: [0x64, 0, 0x33], audio: false }); await f.load();
-  assert.equal(f.sources[0].mime, 'video/mp4; codecs="avc1.640033"'); assert.deepEqual(f.MS.checks, [f.sources[0].mime]); assert.equal(f.sb.mode, 'segments'); assert.equal(f.sb.timestampOffset, 0);
+  assert.equal(f.sources[0].mime, 'video/mp4; codecs="avc1.640033"'); assert.deepEqual(f.MS.checks, [f.sources[0].mime]); assert.equal(f.sb.mode, 'segments'); assert.equal(f.sb.timestampOffset, 10);
   assert.equal(f.fetches[0].maxActive, 1); assert.deepEqual(f.sb.calls[0][1], initBytes({ profile: [0x64, 0, 0x33], audio: false }));
 });
 test('AAC MIME derives from esds and unsupported MIME recovers once then fails', async t => {
@@ -358,20 +359,20 @@ for (const [name, bytes] of [
 test('append queue and remove serialize, split large chunk at 256KiB, EOF waits for drain', async t => {
   const f = fixture(t, { auto: false }); const pending = f.start(); await flush(); f.sources[0].open(); await flush();
   assert.equal(f.sb.calls.length, 1); assert.equal(f.fetches[0].reads, 1); assert.equal(f.sources[0].eos, 0);
-  f.sb.finish(); await flush(); assert.equal(f.sb.calls.length, 2); f.video.readyState = 3; f.sb.finish([[0, 5]]); await flush(); await pending;
+  f.sb.finish(); await flush(); assert.equal(f.sb.calls.length, 2); f.video.readyState = 3; f.sb.finish([[10, 15]]); await flush(); await pending;
   const bytes = new Uint8Array(600000).fill(7); await f.push(bytes); assert.equal(f.sb.calls.at(-1)[1].length, 256 * 1024);
   const readCount = f.fetches[0].reads; f.fetches[0].push({ done: true }); assert.equal(f.sources[0].eos, 0);
   f.sb.finish(); await flush(); assert.equal(f.sb.calls.at(-1)[1].length, 256 * 1024); assert.equal(f.fetches[0].reads, readCount);
   f.sb.finish(); await flush(); assert.equal(f.sb.calls.at(-1)[1].length, 600000 - 512 * 1024);
-  f.sb.finish(); await flush(); assert.equal(f.sources[0].eos, 1); assert.equal(f.fetches[0].maxActive, 1);
+  f.sb.finish(); await flush(); assert.equal(f.sources[0].eos, 0); assert.equal(f.fetches[0].maxActive, 1);
 });
-test('cap stops read at front180, resumes at170, and prunes actual back60 serially', async t => {
+test('cap stops read at front180, resumes at170, and preserves buffers below budget', async t => {
   const f = fixture(t); await f.load(); f.range([[40, 280]], 100); await f.push([9]);
   const reads = f.fetches[0].reads; assert.ok(f.sb.calls.some(call => call[0] === 'append'));
   t.mock.timers.tick(250); await flush(); assert.equal(f.fetches[0].reads, reads);
   f.video._currentTime = 109; f.video.emit('timeupdate'); await flush(); assert.equal(f.fetches[0].reads, reads);
   f.video._currentTime = 110; f.video.emit('timeupdate'); await flush(); assert.equal(f.fetches[0].reads, reads + 1);
-  f.video._currentTime = 120; await f.push([8]); assert.ok(f.sb.calls.some(call => call[0] === 'remove' && call[1] === 0 && call[2] === 60));
+  f.video._currentTime = 120; await f.push([8]); assert.equal(f.sb.calls.some(call => call[0] === 'remove'), false);
   assert.equal(f.video.paused, true); assert.deepEqual(f.buffering, []);
 });
 test('range ends and gaps are outside while range starts are covered', async t => {
@@ -380,10 +381,10 @@ test('range ends and gaps are outside while range starts are covered', async t =
   await f.player.seek(30); await gap; assert.equal(f.video.currentTime, 30); t.mock.timers.tick(120); assert.equal(f.fetches.length, 1);
   const end = f.player.seek(20); t.mock.timers.tick(120); await end; await flush(); assert.equal(f.fetches.at(-1).url, '/preview/token.mp4?start=20.000');
 });
-test('quota preserves bytes, removes back60, retries once before any new read', async t => {
+test('quota preserves bytes, removes a distant edge block, retries once before any new read', async t => {
   const f = fixture(t); await f.load(); f.range([[0, 280]], 100); f.sb.quota = 1; f.setAuto(false);
   await f.push([8, 7, 6]); const sb = f.sb; const readCount = f.fetches[0].reads;
-  assert.deepEqual(sb.calls.at(-1), ['remove', 0, 40]); const bytes = sb.attempts.at(-1);
+  assert.deepEqual(sb.calls.at(-1), ['remove', 220, 280]); const bytes = sb.attempts.at(-1);
   sb.finish(); await flush(); assert.equal(sb.calls.at(-1)[0], 'append'); assert.deepEqual(sb.calls.at(-1)[1], bytes); assert.equal(f.fetches[0].reads, readCount);
   sb.finish(); await flush(); assert.equal(f.prepares, 1);
 });
@@ -398,9 +399,9 @@ test('async append error followed by updateend cannot finish a load or normal EO
 });
 test('initial AV intersection gap over0.1 fails and small gap aligns honestly', async t => {
   const f = fixture(t, { auto: false }); let pending = f.start(70); await flush(); f.sources[0].open(); await flush(); f.sb.finish(); await flush();
-  f.video.readyState = 3; f.sb.videoRanges = [[0.05, 5]]; f.sb.finish([[0, 5]]); f.video.emit('canplay'); await flush(); await pending; assert.equal(f.video.currentTime, 0.05); assert.equal(f.player.getTime(), 70.05);
-  pending = f.start(70); await flush(); f.sources.at(-1).open(); await flush(); f.sb.finish(); await flush(); f.sb.videoRanges = [[0.5, 5]]; f.video.readyState = 3; f.sb.finish([[0, 5]]); f.video.emit('canplay'); await flush();
-  assert.equal(f.prepares, 3); f.sources.at(-1).open(); await flush(); f.sb.finish(); await flush(); f.sb.videoRanges = [[0.5, 5]]; f.video.readyState = 3; f.sb.finish([[0, 5]]); f.video.emit('canplay'); await flush();
+  f.video.readyState = 3; f.sb.videoRanges = [[70.05, 75]]; f.sb.finish([[70, 75]]); f.video.emit('canplay'); await flush(); await pending; assert.equal(f.video.currentTime, 70.05); assert.equal(f.player.getTime(), 70.05);
+  pending = f.start(70); await flush(); f.sources.at(-1).open(); await flush(); f.sb.finish(); await flush(); f.sb.videoRanges = [[70.5, 75]]; f.video.readyState = 3; f.sb.finish([[70, 75]]); f.video.emit('canplay'); await flush();
+  assert.equal(f.prepares, 3); f.sources.at(-1).open(); await flush(); f.sb.finish(); await flush(); f.sb.videoRanges = [[70.5, 75]]; f.video.readyState = 3; f.sb.finish([[70, 75]]); f.video.emit('canplay'); await flush();
   await assert.rejects(pending, /대체 플레이어를 불러오지 못했습니다/); assert.equal(f.errors.length, 1);
 });
 test('preparing bursts retain20 targets and timeout includes initial prepare', async t => {
@@ -443,11 +444,11 @@ test('replacement readiness timeout after a completed load recovers once then fa
   t.mock.timers.tick(15000); await flush(); assert.equal(f.prepares, 2); assert.equal(f.errors.length, 1); assert.equal(f.video.paused, true); assert.equal(f.buffering.at(-1), false);
 });
 test('buffered delayed setters accumulate ten +10 seeks with no fetch or debounce', async t => {
-  const f = fixture(t); await f.load(100); f.range([[0, 180]], 60); f.video.delayedSeek = true;
+  const f = fixture(t); await f.load(100); f.range([[100, 280]], 160); f.video.delayedSeek = true;
   const promises = []; for (let i = 0; i < 10; i++) { promises.push(f.player.seek(f.player.getTime() + 10)); assert.equal(f.player.getTime(), 170 + i * 10); }
-  assert.equal(f.video.seekTarget, 160); assert.equal(f.fetches.length, 1); assert.equal(f.video.assignments.length, 11);
+  assert.equal(f.video.seekTarget, 260); assert.equal(f.fetches.length, 1); assert.equal(f.video.assignments.length, 11);
   t.mock.timers.tick(250); assert.equal(f.times.at(-1), 260); assert.equal(f.fetches.length, 1); assert.deepEqual(f.buffering, []);
-  f.video.completeSeek(); await Promise.all(promises); assert.equal(f.video.currentTime, 160); assert.equal(f.player.getTime(), 260);
+  f.video.completeSeek(); await Promise.all(promises); assert.equal(f.video.currentTime, 260); assert.equal(f.player.getTime(), 260);
 });
 test('duplicate video and SourceBuffer errors share one pending prepare recovery', async t => {
   let resolve; const f = fixture(t, { prepare: (_id, calls) => calls === 2 ? new Promise(done => { resolve = done; }) : { path: '/preview/token.mp4' } });
@@ -455,23 +456,228 @@ test('duplicate video and SourceBuffer errors share one pending prepare recovery
   resolve({ path: '/preview/retry.mp4' }); await f.ready(); assert.equal(f.player.getTime(), 10); assert.deepEqual(f.errors, []);
 });
 test('video events from an old currentSrc cannot recover or align the new stream', async t => {
-  const f = fixture(t); await f.load(70); const oldURL = f.video.src; await f.dispatch(800);
-  f.video.currentSrc = oldURL; await f.ready(); f.video.emit('error'); f.video.emit('ended'); await flush();
-  assert.equal(f.prepares, 1); assert.equal(f.player.getTime(), 800); assert.equal(f.video.assignments.at(-1), 0); assert.deepEqual(f.errors, []);
-  f.video.currentSrc = f.video.src; f.video.emit('canplay'); await flush(); assert.equal(f.player.getTime(), 800);
+  const f = fixture(t); await f.load(70); const oldURL = f.video.src; const replacement = f.start(800);
+  await flush(); f.video.currentSrc = oldURL; await f.ready(); f.video.emit('error'); f.video.emit('ended'); await flush();
+  assert.equal(f.prepares, 2); assert.equal(f.player.getTime(), 800); assert.equal(f.video.assignments.at(-1), 70); assert.deepEqual(f.errors, []);
+  f.video.currentSrc = f.video.src; f.video.emit('canplay'); await replacement; assert.equal(f.player.getTime(), 800);
 });
 test('returning to a covered target cancels buffering even while its setter is delayed', async t => {
   const f = fixture(t); await f.load(); f.video.delayedSeek = true; await f.dispatch(800);
   t.mock.timers.tick(250); assert.deepEqual(f.buffering, [true]); await f.ready(); assert.equal(f.video.seeking, true);
   await f.player.seek(801); assert.deepEqual(f.buffering, [true, false]); assert.equal(f.player.getTime(), 801); assert.equal(f.fetches.length, 2);
-  f.video.completeSeek(); await flush(); assert.equal(f.player.getTime(), 801); assert.equal(f.video.currentTime, 1);
+  f.video.completeSeek(); await flush(); assert.equal(f.player.getTime(), 801); assert.equal(f.video.currentTime, 801);
 });
 for (const stage of ['sourceopen', 'read', 'append', 'remove', 'cap']) test(`destroy while ${stage} settles load and owns all cleanup`, async t => {
   const f = fixture(t); const pending = f.start(); await flush();
   if (stage !== 'sourceopen') { await f.ready(); await pending; }
   f.setAuto(false);
   if (stage === 'append') await f.push([7]);
-  if (stage === 'remove' || stage === 'cap') { f.range(stage === 'cap' ? [[40, 280]] : [[0, 280]], 100); await f.push([8]); }
+  if (stage === 'remove') {
+    f.range([[10, 17], [200, 210], [400, 410], [600, 610], [800, 807]], 10); f.video.emit('timeupdate'); await flush();
+    assert.equal(f.sb.operation, 'remove'); assert.equal(f.sb.updating, true);
+  }
+  if (stage === 'cap') { f.range([[40, 280]], 100); await f.push([8]); f.sb.finish(); await flush(); assert.equal(f.fetches[0].active, 0); }
   f.player.destroy(); if (stage === 'sourceopen') await assert.rejects(pending, /SUPERSEDED/);
   await flush(); assert.equal(f.live.size, 0); assert.equal(f.fetches[0].signal.aborted, true); assert.equal(f.fetches[0].active, 0); assert.equal(f.sources[0].eos, 0); assert.deepEqual(f.errors, []);
+});
+
+test('absolute A B A reuses one MediaSource SourceBuffer URL and preserves both ranges', async t => {
+  const f = fixture(t, { absolute: true, mediaScript: { fragments: [{ video: [[0, 7]] }] } });
+  await f.load(10); const source = f.sources[0], sb = f.sb, url = f.video.src;
+  await f.dispatch(800); await f.ready();
+  assert.deepEqual(sb.ranges, [[10, 17], [800, 807]]);
+  await f.player.seek(10);
+  assert.equal(f.video.currentTime, 10); assert.equal(f.fetches.length, 2);
+  assert.equal(f.sources.length, 1); assert.equal(f.sb, sb); assert.equal(f.sources[0], source); assert.equal(f.video.src, url);
+  assert.equal(f.log.filter(([kind]) => kind === 'addSourceBuffer').length, 1);
+  assert.equal(f.log.filter(([kind]) => kind === 'init').length, 2);
+  assert.equal(f.prepares, 1); assert.deepEqual(f.errors, []);
+});
+
+test('absolute seek inside A changes only currentTime and preserves the live reader', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(10);
+  const request = f.fetches[0], count = f.sb.calls.length, loads = f.video.sources.length;
+  await f.player.seek(12.5);
+  assert.equal(f.video.currentTime, 12.5); assert.equal(f.fetches.length, 1); assert.equal(request.signal.aborted, false);
+  assert.equal(f.sb.calls.length, count); assert.equal(f.video.sources.length, loads); assert.deepEqual(f.buffering, []);
+});
+
+test('absolute fractional target rounds request offset to three digits but aligns the original target', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(70.1234);
+  assert.equal(f.fetches[0].url, '/preview/token.mp4?start=70.123'); assert.equal(f.sb.timestampOffset, 70.123);
+  assert.deepEqual(f.sb.ranges, [[70.123, 75.123]]); assert.equal(f.video.currentTime, 70.1234); assert.equal(f.player.getTime(), 70.1234);
+});
+
+test('absolute fifth range evicts the farthest range and retains current and target protection', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(10);
+  f.range([[10, 17], [200, 210], [400, 410], [600, 610]], 10);
+  f.video.delayedSeek = true;
+  await f.dispatch(800); await f.ready();
+  const removes = f.sb.calls.filter(([kind]) => kind === 'remove');
+  assert.deepEqual(removes, [['remove', 200, 210]]);
+  assert.deepEqual(f.sb.ranges, [[10, 17], [400, 410], [600, 610], [800, 805]]);
+  f.video.completeSeek(); await flush();
+  assert.equal(f.sources.length, 1); assert.equal(f.prepares, 1);
+});
+
+test('absolute 720 second budget evicts far edge blocks and preserves both protection windows', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(10);
+  f.range([[0, 900]], 400); f.video.delayedSeek = true;
+  await f.player.seek(700); f.video.emit('timeupdate'); await flush();
+  assert.deepEqual(f.sb.calls.filter(([kind]) => kind === 'remove'), [['remove', 0, 60], ['remove', 60, 120], ['remove', 120, 180]]);
+  assert.deepEqual(f.sb.ranges, [[180, 900]]);
+  assert.equal(f.video.currentTime, 400); assert.equal(f.player.getTime(), 700);
+  assert.ok(f.sb.ranges.some(([a, b]) => a <= 340 && b >= 410));
+  assert.ok(f.sb.ranges.some(([a, b]) => a <= 640 && b >= 710));
+});
+
+test('absolute Quota removes one far range and retries identical bytes once before reading', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(10); f.range([[10, 17], [800, 807]], 10);
+  f.sb.quota = 1; f.setAuto(false); const before = f.sb.attempts.length;
+  await f.push([8, 7, 6]); const reads = f.fetches[0].reads;
+  assert.deepEqual(f.sb.calls.at(-1), ['remove', 800, 807]); assert.equal(f.sb.attempts.length, before + 1);
+  f.sb.finish(); await flush();
+  assert.deepEqual(f.sb.attempts.at(-1), f.sb.attempts[before]); assert.equal(f.sb.attempts.length, before + 2);
+  assert.equal(f.fetches[0].reads, reads); f.sb.finish(); await flush();
+  assert.deepEqual(f.sb.ranges, [[10, 17]]); assert.equal(f.prepares, 1); assert.deepEqual(f.errors, []);
+});
+
+test('absolute cancelled late read cannot append bytes or recover against a new request', async t => {
+  const f = fixture(t, { absolute: true, deferCancelRead: true }); await f.load(10);
+  const old = f.fetches[0]; assert.equal(old.active, 1);
+  await f.dispatch(800); await f.ready(); const calls = f.sb.calls.length;
+  old.push({ value: Uint8Array.of(99, 98), done: false }); await flush();
+  assert.equal(f.sb.calls.length, calls); assert.equal(old.cancels, 1); assert.equal(old.signal.aborted, true);
+  assert.deepEqual(f.sb.ranges, [[10, 15], [800, 805]]); assert.equal(f.player.getTime(), 800); assert.equal(f.prepares, 1); assert.deepEqual(f.errors, []);
+});
+
+test('absolute cancelled late read rejection and intentional abort never trigger recovery', async t => {
+  const f = fixture(t, { absolute: true, deferCancelRead: true }); await f.load(10); const old = f.fetches[0];
+  await f.dispatch(800); await f.ready(); old.push(new Error('late cancellation')); await flush();
+  assert.equal(f.log.filter(([kind]) => kind === 'abort').length, 1);
+  const sequence = f.log.map(([kind]) => kind), at = sequence.indexOf('abort');
+  assert.deepEqual(sequence.slice(at + 3, at + 7), ['appendWindowStart', 'appendWindowEnd', 'timestampOffset', 'init']);
+  assert.equal(f.sb.timestampOffset, 800); assert.equal(f.sb.appendWindowEnd, Infinity);
+  assert.equal(f.prepares, 1); assert.deepEqual(f.errors, []);
+});
+
+test('absolute EOF and native ended before metadata end keep MSE open without endpoint', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(10); await f.push(null);
+  f.video.emit('ended'); t.mock.timers.tick(250); await flush();
+  assert.equal(f.sources[0].readyState, 'open'); assert.equal(f.sources[0].eos, 0); assert.equal(f.player.getTime(), 10);
+  assert.equal(f.times.at(-1), 10); assert.equal(f.fetches.length, 1);
+  await f.player.seek(12); assert.equal(f.video.currentTime, 12); assert.equal(f.fetches.length, 1);
+});
+
+test('absolute nonzero remove removes only the distant range', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(10);
+  f.range([[10, 17], [200, 210], [400, 410], [600, 610], [800, 807]], 10);
+  f.video.emit('timeupdate'); await flush();
+  assert.deepEqual(f.sb.calls.filter(([kind]) => kind === 'remove'), [['remove', 800, 807]]);
+  assert.deepEqual(f.video.ranges, [[10, 17], [200, 210], [400, 410], [600, 610]]);
+});
+
+test('absolute seek during append waits for updateend then aborts and drops remaining old slices', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(10); f.setAuto(false);
+  await f.push(new Uint8Array(600000).fill(99)); assert.equal(f.sb.updating, true);
+  await f.dispatch(800); assert.equal(f.log.some(([kind]) => kind === 'abort'), false);
+  f.sb.finish(); await flush();
+  assert.equal(f.log.filter(([kind]) => kind === 'abort').length, 1);
+  assert.equal(f.sb.calls.filter(([kind, bytes]) => kind === 'append' && bytes[0] === 99).length, 1);
+  f.sb.finish(); await flush(); f.sb.finish(); await flush(); await f.ready();
+  assert.equal(f.video.currentTime, 800); assert.equal(f.prepares, 1); assert.deepEqual(f.errors, []);
+});
+
+test('absolute seek during remove never aborts until removal completes', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(10); f.setAuto(false);
+  f.range([[10, 17], [200, 210], [400, 410], [600, 610], [800, 807]], 10); f.video.emit('timeupdate'); await flush();
+  assert.equal(f.sb.operation, 'remove'); await f.dispatch(900);
+  assert.equal(f.log.filter(([kind]) => kind === 'abort').length, 0);
+  f.sb.finish(); await flush(); assert.equal(f.log.filter(([kind]) => kind === 'abort').length, 1);
+  f.sb.finish(); await flush(); f.sb.finish(); await flush(); await f.ready();
+  assert.equal(f.video.currentTime, 900); assert.equal(f.prepares, 1); assert.deepEqual(f.errors, []);
+});
+
+test('absolute endpoint preserves A cache for a backward seek without fetch', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(10); const sb = f.sb, url = f.video.src;
+  await f.player.seek(1000); await f.player.seek(12);
+  assert.equal(f.video.currentTime, 12); assert.equal(f.fetches.length, 1); assert.equal(f.sb, sb); assert.equal(f.video.src, url);
+  assert.equal(f.sources[0].readyState, 'open'); assert.deepEqual(f.errors, []);
+});
+
+test('absolute new B request uses pending B front rather than old A front for cap', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(10); f.range([[10, 250]], 10);
+  await f.dispatch(800); await f.ready();
+  assert.ok(f.fetches[1].reads >= 3); assert.deepEqual(f.sb.ranges, [[10, 250], [800, 805]]); assert.equal(f.video.currentTime, 800);
+});
+
+test('absolute refill starts at current range end without changing time src or play intention', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(10); await f.player.togglePlay(); await f.push(null);
+  const assignments = f.video.assignments.length, url = f.video.src;
+  f.video._currentTime = 12; f.video.emit('timeupdate'); await flush();
+  assert.equal(f.fetches[1].url, '/preview/token.mp4?start=15.000');
+  assert.equal(f.video.currentTime, 12); assert.equal(f.player.getTime(), 12); assert.equal(f.video.assignments.length, assignments);
+  assert.equal(f.video.paused, false); assert.equal(f.video.src, url); assert.deepEqual(f.sb.ranges, [[10, 20]]);
+  assert.deepEqual(f.buffering, []); assert.equal(f.prepares, 1);
+});
+
+test('absolute rounded-up start permits only the honest initial submillisecond alignment', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(70.1236);
+  assert.equal(f.fetches[0].url, '/preview/token.mp4?start=70.124'); assert.equal(f.sb.timestampOffset, 70.124);
+  assert.equal(f.video.currentTime, 70.124); assert.equal(f.player.getTime(), 70.124); assert.deepEqual(f.errors, []);
+});
+
+test('absolute exactly four ranges and 720 seconds retain all cached ranges', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(10);
+  const ranges = [[0, 180], [200, 380], [500, 680], [800, 980]];
+  f.range(ranges, 500); f.video.emit('timeupdate'); await flush();
+  assert.deepEqual(f.sb.ranges, ranges); assert.equal(f.sb.calls.some(([kind]) => kind === 'remove'), false);
+});
+
+test('absolute equal-distance eviction chooses the smaller start first', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(500);
+  f.range([[100, 110], [400, 410], [500, 505], [590, 600], [890, 900]], 500);
+  f.video.emit('timeupdate'); await flush();
+  assert.deepEqual(f.sb.calls.filter(([kind]) => kind === 'remove'), [['remove', 100, 110]]);
+  assert.ok(f.sb.ranges.some(([a, b]) => a === 890 && b === 900));
+});
+
+test('absolute eviction re-queries actual ranges after a shortened removal', async t => {
+  let first = true;
+  const f = fixture(t, { absolute: true, removeResult: (a, b) => { if (first) { first = false; return [a, b - 1]; } return [a, b]; } });
+  await f.load(10); f.range([[10, 17], [200, 210], [400, 410], [600, 610], [800, 807]], 10);
+  f.video.emit('timeupdate'); await flush();
+  assert.deepEqual(f.sb.calls.filter(([kind]) => kind === 'remove'), [['remove', 800, 807], ['remove', 806, 807]]);
+  assert.deepEqual(f.sb.ranges, [[10, 17], [200, 210], [400, 410], [600, 610]]); assert.equal(f.prepares, 1);
+});
+
+test('absolute non-progressing removal recovers instead of repeating indefinitely', async t => {
+  const f = fixture(t, { absolute: true, removeResult: a => [a, a] }); await f.load(10); const sb = f.sb;
+  f.range([[10, 17], [200, 210], [400, 410], [600, 610], [800, 807]], 10); f.video.emit('timeupdate'); await flush();
+  assert.equal(sb.calls.filter(([kind]) => kind === 'remove').length, 1); assert.equal(f.prepares, 2);
+  await f.ready(); assert.equal(f.player.getTime(), 10); assert.deepEqual(f.errors, []);
+});
+
+test('absolute refill cap wait does not use the fifteen-second readiness timeout', async t => {
+  const f = fixture(t, { absolute: true, mediaScript: ({ sb }) => ({ fragments: [{ video: [[0, sb.timestampOffset === 10 ? 5 : 200]] }] }) });
+  await f.load(10); await f.player.togglePlay(); await f.push(null); f.video.emit('timeupdate'); await flush();
+  assert.deepEqual(f.sb.ranges, [[10, 215]]); assert.equal(f.fetches[1].active, 0);
+  t.mock.timers.tick(15000); await flush();
+  assert.equal(f.prepares, 1); assert.equal(f.video.currentTime, 10); assert.equal(f.video.paused, false); assert.deepEqual(f.errors, []);
+});
+
+test('absolute two EOF refills at the same non-progressing boundary recover without fake endpoint', async t => {
+  const f = fixture(t, { absolute: true, mediaScript: ({ sb }) => ({ fragments: sb.timestampOffset === 10 ? [{ video: [[0, 5]] }] : [] }) });
+  await f.load(10); await f.player.togglePlay(); await f.push(null);
+  f.video.emit('timeupdate'); await flush(); assert.equal(f.fetches[1].url, '/preview/token.mp4?start=15.000'); await f.push(null);
+  f.video.emit('timeupdate'); await flush(); assert.equal(f.fetches[2].url, '/preview/token.mp4?start=15.000'); await f.push(null);
+  assert.equal(f.prepares, 2); assert.equal(f.player.getTime(), 10); assert.equal(f.times.includes(1000), false);
+  await f.ready(); assert.deepEqual(f.errors, []);
+});
+
+test('absolute eviction removes eligible whole ranges before trimming a protected long range', async t => {
+  const f = fixture(t, { absolute: true }); await f.load(800); f.range([[0, 900], [950, 960]], 800);
+  f.video.emit('timeupdate'); await flush();
+  assert.deepEqual(f.sb.calls.filter(([kind]) => kind === 'remove'), [['remove', 950, 960], ['remove', 0, 60], ['remove', 60, 120], ['remove', 120, 180]]);
+  assert.deepEqual(f.sb.ranges, [[180, 900]]); assert.equal(f.prepares, 1);
 });
