@@ -94,11 +94,24 @@
           <label for="ffmpeg-path">FFmpeg 경로</label><input id="ffmpeg-path" name="ffmpeg-path" type="text">
           <div class="ytdlp-settings" hidden>
             <strong>yt-dlp</strong>
-            <label><input id="auto-update-ytdlp" type="checkbox" checked> yt-dlp 자동 업데이트</label>
-            <span id="ytdlp-current-version"></span>
-            <button id="ytdlp-check-button" type="button">지금 확인</button>
-            <p id="ytdlp-status" role="status" aria-live="polite"></p>
-          </div>
+              <label><input id="auto-update-ytdlp" type="checkbox" checked> yt-dlp 자동 업데이트</label>
+              <span id="ytdlp-current-version"></span>
+              <button id="ytdlp-check-button" type="button">지금 확인</button>
+              <span id="ytdlp-download-size"></span>
+              <button id="ytdlp-download-button" type="button" hidden>다운로드</button>
+              <progress id="ytdlp-progress" max="100" aria-label="yt-dlp 다운로드 진행률" hidden></progress>
+              <p id="ytdlp-status" role="status" aria-live="polite"></p>
+            </div>
+            <div class="ffmpeg-settings">
+              <strong>ffmpeg</strong>
+              <label><input id="auto-update-ffmpeg" name="auto-update-ffmpeg" type="checkbox"> ffmpeg 자동 업데이트</label>
+              <span id="ffmpeg-current-version"></span>
+              <button id="ffmpeg-check-button" type="button">지금 확인</button>
+              <span id="ffmpeg-download-size"></span>
+              <button id="ffmpeg-download-button" type="button" hidden>다운로드</button>
+              <progress id="ffmpeg-progress" max="100" aria-label="ffmpeg 다운로드 진행률" hidden></progress>
+              <p id="ffmpeg-status" role="status" aria-live="polite"></p>
+            </div>
         </section>
         <section id="settings-panel-update" role="tabpanel" aria-labelledby="settings-tab-update" hidden>
         <div class="update-settings" hidden>
