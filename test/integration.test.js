@@ -1010,7 +1010,8 @@ test('queue status actions use SVG, stop bubbling, and surface backend errors', 
     const buttons = row.children.at(-1).children;
     assert.deepEqual(buttons.map(button => button.getAttribute('data-action')), expected);
     if (fileDeleted) assert.equal(row.children[1].children[1].textContent, '삭제된 파일');
-    if (status === 'failed') assert.match(row.title, /FAILED: Full error detail/);
+    // 예전 stderr 원문은 화면에 노출하지 않고 안전한 문구로 바꿔 보여 준다.
+    if (status === 'failed') { assert.match(row.title, /콘텐츠 정보를 가져오지 못했습니다/); assert.doesNotMatch(row.title, /Full error detail/); }
     for (const button of buttons) {
       assert.equal(button.textContent, undefined);
       assert.equal(button.getAttribute('data-tip'), button.getAttribute('aria-label'));
@@ -1068,7 +1069,7 @@ test('settings modal resets saved fields, preserves categories, saves all values
   assert.equal(dialog.open, true); assert.equal(node('settings-error').textContent, 'Save failed');
   assert.equal(node('app-error').textContent, 'Save failed');
   fail = false; await node('settings-form').emit('submit');
-  assert.deepEqual(payload, { ...saved, outputDir: 'new', ytDlpPath: 'new-yt', previewResolution: 480, alwaysUseLocalPlayer: true });
+  assert.deepEqual(payload, { ...saved, outputDir: 'new', ytDlpPath: 'new-yt', autoUpdateFfmpeg: false, previewResolution: 480, alwaysUseLocalPlayer: true });
   assert.equal(dialog.open, false); assert.equal(node('settings-button').focused, true);
   await node('settings-button').emit('click'); assert.equal(node('settings-panel-general').hidden, false);
   node('output-dir').value = 'discard'; await node('settings-close-button').emit('click');

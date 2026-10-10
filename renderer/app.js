@@ -2,14 +2,15 @@ import { formatTime } from '../lib/time.js';
 import { normalizeTimeline } from '../lib/timeline.js';
 import { createPlayer } from './player.js';
 import { createLocalPlayer } from './local-player.js';
+import { safeToolError } from '../lib/tool-errors.js';
 
 
 export function createApp({ player, timelineView, ytcut, document: doc, youtubeFactory = createPlayer, localFactory = createLocalPlayer }) {
-  const settingsIds = { ytDlpPath: 'yt-dlp-path', ffmpegPath: 'ffmpeg-path', outputDir: 'output-dir', cutMode: 'cut-mode', format: 'settings-format', autoUpdateYtDlp: 'auto-update-ytdlp', previewResolution: 'preview-resolution', alwaysUseLocalPlayer: 'always-use-local-player' };
+  const settingsIds = { ytDlpPath: 'yt-dlp-path', ffmpegPath: 'ffmpeg-path', outputDir: 'output-dir', cutMode: 'cut-mode', format: 'settings-format', autoUpdateYtDlp: 'auto-update-ytdlp', autoUpdateFfmpeg: 'auto-update-ffmpeg', previewResolution: 'preview-resolution', alwaysUseLocalPlayer: 'always-use-local-player' };
   const unwrap = result => { if (!result.ok) throw result.error; return result.value; };
   const el = id => doc.getElementById(id);
   const copy = value => value == null ? value : structuredClone(value);
-  let settings = { format: 'mp4', cutMode: 'accurate', autoUpdateYtDlp: true, previewResolution: 480, alwaysUseLocalPlayer: true };
+  let settings = { format: 'mp4', cutMode: 'accurate', autoUpdateYtDlp: true, autoUpdateFfmpeg: false, previewResolution: 480, alwaysUseLocalPlayer: true };
   let state = { video: null, timeline: { startSec: 0, endSec: 0 }, cutMode: 'accurate', format: 'mp4', fileName: '' };
   let generation = 0;
   let revision = -1;
@@ -26,6 +27,95 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
   const queueNames = new Map();
   let refreshFilesTimer;
   const listeners = [];
+  const toolsEnabled = ['toolsState', 'checkTool', 'downloadTool', 'onToolsChanged'].every(name => typeof ytcut[name] === 'function');
+  let toolsState = null, toolsPushes = 0, toolsBusy = new Set(), toolsAcked = new Set(), toolsAutoAcking = new Set();
+  const visibilityWaiters = new Set();
+  let unsubscribeTools;
+  const toolLabels = { idle: '자동 갱신 꺼짐', disabled: '사용자 지정 경로 사용 중', missing: 'ffmpeg가 없어 설치를 준비합니다', checking: '새 버전 확인 중…', downloading: '받는 중…', verifying: '파일 검증 중…', extracting: 'ffmpeg 준비 중…', 'downloaded-pending': '준비됨. 대기열이 비면 적용합니다', 'stopping-preview': '미리보기를 종료하고 적용 중…', replacing: '미리보기를 종료하고 적용 중…', installed: 'ffmpeg 설치 완료', updated: '새 버전 적용 완료', 'up-to-date': '최신 버전입니다', pinned: '현재 버전 고정됨', error: '설치/갱신 실패. 기존 도구는 계속 사용합니다', unavailable: '도구가 없습니다. 연결 후 다시 설치하거나 경로를 지정하세요' };
+  function formatToolSize(bytes) { return Number.isSafeInteger(bytes) && bytes > 0 ? `${(bytes / 1048576).toFixed(1)} MiB` : ''; }
+  function renderTools() {
+    if (disposed || !toolsEnabled || !toolsState) return;
+    for (const toolId of ['ytDlp', 'ffmpeg']) {
+      const tool = toolsState[toolId];
+      const prefix = toolId === 'ytDlp' ? 'ytdlp' : 'ffmpeg';
+      const current = el(`${prefix}-current-version`);
+      const status = el(`${prefix}-status`);
+      const size = el(`${prefix}-download-size`);
+      const check = el(`${prefix}-check-button`);
+      const download = el(`${prefix}-download-button`);
+      if (!tool) continue;
+      if (current) current.textContent = tool.currentVersion ? `현재 버전 ${tool.currentVersion}` : '현재 버전 확인 중';
+      const bytesText = formatToolSize(tool.downloadBytes);
+      if (size) size.textContent = bytesText;
+      const statusText = toolId === 'ffmpeg' && tool.needsInstall === true && bytesText ? `ffmpeg가 필요합니다. ${bytesText}를 받아 설치합니다.`
+        : tool.status === 'available' ? `${toolId === 'ffmpeg' ? 'ffmpeg 설치/갱신' : 'yt-dlp 설치/갱신'}: ${bytesText}`
+        : tool.status === 'downloading' ? `받는 중… ${Number.isFinite(tool.percent) ? tool.percent : 0}%`
+          : toolLabels[tool.status] || (tool.error?.message || '');
+      if (status) { status.textContent = statusText; status.className = tool.status === 'error' ? 'update-error' : ''; }
+      if (check) check.disabled = toolsBusy.has(toolId) || tool.status === 'checking';
+      if (download) {
+        const actionable = tool.status === 'available' || (tool.status === 'error' && tool.needsInstall && tool.candidateId && bytesText);
+        download.hidden = !actionable;
+        download.disabled = toolsBusy.has(toolId);
+        download.textContent = tool.status === 'error' ? '다시 설치' : '받아 적용';
+      }
+    }
+  }
+  function acceptTools(value) {
+    if (!value || !Number.isFinite(value.revision) || (toolsState && value.revision <= toolsState.revision)) return;
+    toolsState = value;
+    renderTools();
+    const ffmpeg = value.ffmpeg;
+    if (ffmpeg?.needsInstall === true && ffmpeg.candidateId && Number.isSafeInteger(ffmpeg.downloadBytes) && ffmpeg.downloadBytes > 0
+      && !toolsAcked.has(ffmpeg.candidateId) && !toolsAutoAcking.has(ffmpeg.candidateId)) void acknowledgeInitialFfmpeg(ffmpeg);
+  }
+  const nextPaint = () => new Promise(resolve => (doc.defaultView?.requestAnimationFrame || requestAnimationFrame)(resolve));
+  async function acknowledgeInitialFfmpeg(candidate) {
+    const { candidateId, downloadBytes } = candidate;
+    if (toolsAcked.has(candidateId) || toolsAutoAcking.has(candidateId)) return;
+    toolsAutoAcking.add(candidateId);
+    try {
+      while (!disposed && doc.visibilityState === 'hidden') await new Promise(resolve => {
+        const shown = () => { if (disposed || doc.visibilityState !== 'hidden') { doc.removeEventListener('visibilitychange', shown); visibilityWaiters.delete(shown); resolve(); } };
+        visibilityWaiters.add(shown);
+        doc.addEventListener('visibilitychange', shown);
+        if (doc.visibilityState !== 'hidden') shown();
+      });
+      if (disposed) return;
+      await nextPaint(); await nextPaint();
+      const current = toolsState?.ffmpeg;
+      if (disposed || !current?.needsInstall || current.candidateId !== candidateId || current.downloadBytes !== downloadBytes) return;
+      toolsAcked.add(candidateId);
+      await downloadTool('ffmpeg', current, downloadBytes);
+    } finally { toolsAutoAcking.delete(candidateId); }
+  }
+  async function downloadTool(toolId, tool, acknowledgedBytes) {
+    const candidateId = tool?.candidateId;
+    if (disposed || !candidateId || toolsBusy.has(toolId)) return;
+    toolsBusy.add(toolId); renderTools();
+    try {
+      const value = unwrap(await ytcut.downloadTool({ toolId, candidateId, acknowledgedBytes }));
+      acceptTools(value);
+    } catch (error) {
+      if (!disposed) { const safe = safeToolError(error); if (toolId === 'ffmpeg') el('ffmpeg-status').textContent = safe.message; else el('ytdlp-status').textContent = safe.message; }
+    } finally { toolsBusy.delete(toolId); renderTools(); }
+  }
+  if (toolsEnabled) {
+    unsubscribeTools = ytcut.onToolsChanged(value => { toolsPushes++; acceptTools(value); });
+    for (const toolId of ['ytDlp', 'ffmpeg']) {
+      const prefix = toolId === 'ytDlp' ? 'ytdlp' : 'ffmpeg';
+      listen(`${prefix}-check-button`, 'click', async () => {
+        if (disposed || toolsBusy.has(toolId)) return;
+        toolsBusy.add(toolId); renderTools();
+        try { acceptTools(unwrap(await ytcut.checkTool(toolId))); } catch { /* 상태 갱신은 push에 맡긴다. */ }
+        finally { toolsBusy.delete(toolId); renderTools(); }
+      });
+      listen(`${prefix}-download-button`, 'click', () => {
+        const tool = toolsState?.[toolId];
+        if (tool && Number.isSafeInteger(tool.downloadBytes)) void downloadTool(toolId, tool, tool.downloadBytes);
+      });
+    }
+  }
   let loadState;
   const fallbackMessage = 'YouTube 임베드 오류로 대체 플레이어를 사용합니다.';
   const loadingLabel = text => {
@@ -131,12 +221,12 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
     if (el('app-error')) el('app-error').textContent = text;
     if (el('settings-dialog')?.open && el('settings-error')) el('settings-error').textContent = text;
   };
-  const listen = (id, event, fn) => {
+  function listen(id, event, fn) {
     const node = el(id);
     if (!node) return;
     node.addEventListener(event, fn);
     listeners.push(() => node.removeEventListener(event, fn));
-  };
+  }
   const ytdlpEnabled = ['ytdlpState', 'checkYtdlp', 'onYtdlpChanged'].every(name => typeof ytcut[name] === 'function');
   let ytdlp = null, ytdlpPushes = 0, ytdlpBusy = false, ytdlpFlashTimer;
   let unsubscribeYtdlp;
@@ -375,6 +465,7 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
       if (disposed || requestId !== generation) return;
       state.video = copy(metadata);
       el('video-title').textContent = metadata.title;
+      if (Array.isArray(result.value.warnings) && result.value.warnings.length) message(safeToolError(result.value.warnings[0]).message);
       if (!restored) state.timeline.endSec = Number(metadata.durationSec) || 0;
       ready = true;
       renderEditor();
@@ -503,7 +594,8 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
         if (title.children[0] !== nameEdit.editingNode) { title.replaceChildren(); title.append(nameEdit.editingNode); }
         nameEdit.editingNode.readOnly = nameEdit.pending;
       } else { title.replaceChildren(); title.textContent = queueTitle(item); }
-      row.title = `${queueTitle(item)}\n${String(item.snapshot.format).toUpperCase()}${item.error ? '\n' + (item.error.code || '') + ': ' + (item.error.message || item.error) : ''}`;
+      const safeError = item.status === 'failed' && item.error ? safeToolError(item.error) : null;
+      row.title = `${queueTitle(item)}\n${String(item.snapshot.format).toUpperCase()}${safeError ? '\n' + safeError.message : ''}`;
       const nameError = previous?.nameError || doc.createElement('span');
       nameError.className = 'queue-name-error';
       nameError.setAttribute('role', 'alert');
@@ -526,6 +618,7 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
       status.textContent = item.fileDeleted === true ? '삭제된 파일'
         : statusName === 'running' ? (item.phase === 'processing' ? '후처리 중'
           : '진행 ' + Math.round(percentage) + '%' + remaining) : statuses[statusName];
+      if (safeError) status.textContent = safeError.message;
       const renderedRow = { row, title, nameError, meta, status, item, statusName, statusText: status.textContent };
       queueRows.push(renderedRow);
       renderRowLoading(renderedRow);
@@ -619,6 +712,7 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
       el('tools').textContent = `${label('yt-dlp', payload.tools.ytDlp)} · ${label('ffmpeg', payload.tools.ffmpeg)}`;
       renderYtdlp();
     }
+    if (payload.toolStates) acceptTools(payload.toolStates);
     if (payload.error) message(payload.error);
   }
   // Subscribe before invoking bootstrap so a late bootstrap cannot undo a push.
@@ -746,7 +840,7 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
     if (el('settings-error')) el('settings-error').textContent = '';
     const pending = {};
     for (const key of Object.keys(settingsIds)) {
-      pending[key] = ['autoUpdateYtDlp', 'alwaysUseLocalPlayer'].includes(key) ? (el(settingsIds[key])?.checked ?? settings[key] !== false)
+      pending[key] = ['autoUpdateYtDlp', 'autoUpdateFfmpeg', 'alwaysUseLocalPlayer'].includes(key) ? (el(settingsIds[key])?.checked ?? settings[key] !== false)
         : key === 'previewResolution' ? Number(el(settingsIds[key])?.value || settings[key]) : el(settingsIds[key])?.value || settings[key];
     }
     settings = copy(unwrap(await ytcut.saveSettings(copy(pending))));
@@ -755,7 +849,7 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
   function fillSettings() {
     for (const [key, id] of Object.entries(settingsIds)) {
       const node = el(id);
-      if (node && ['autoUpdateYtDlp', 'alwaysUseLocalPlayer'].includes(key)) node.checked = settings[key] !== false;
+      if (node && ['autoUpdateYtDlp', 'autoUpdateFfmpeg', 'alwaysUseLocalPlayer'].includes(key)) node.checked = settings[key] !== false;
       else if (node) node.value = String(settings[key] ?? '');
     }
   }
@@ -802,6 +896,11 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
   renderEditor();
   renderLoading();
   const bootstrapped = Promise.resolve().then(() => ytcut.bootstrap()).then(unwrap).then(apply).catch(message);
+  if (toolsEnabled) bootstrapped.then(() => {
+    if (disposed) return;
+    const pushes = toolsPushes;
+    return ytcut.toolsState().then(unwrap).then(value => { if (!disposed && pushes === toolsPushes) acceptTools(value); });
+  }).catch(() => {});
   return {
     bootstrapped, updateInitialized, ytdlpInitialized, edit, onChange, onSeek, onTime, onPlayerError,
     getState: () => copy(state),
@@ -815,6 +914,8 @@ export function createApp({ player, timelineView, ytcut, document: doc, youtubeF
       unsubscribe?.();
       unsubscribeUpdate?.();
       unsubscribeYtdlp?.();
+      unsubscribeTools?.();
+      for (const waiter of [...visibilityWaiters]) waiter();
       clearTimeout(ytdlpFlashTimer);
       clearTimeout(refreshFilesTimer);
       queueNames.clear();
