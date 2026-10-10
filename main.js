@@ -24,7 +24,8 @@ import { createPreviewStream } from './lib/preview-stream.js';
 const { autoUpdater } = updaterPkg;
 
 // 표시 이름을 바꿔도 기존 설정·대기열과 관리 도구를 계속 읽도록 데이터 폴더를 고정한다.
-app.setPath('userData', getLegacyUserDataPath(app.getPath('appData')));
+// 개발·검증에서 --user-data-dir 를 명시했으면 그 경로를 존중한다(실제 사용자 데이터를 건드리지 않기 위해).
+if (!app.commandLine.hasSwitch('user-data-dir')) app.setPath('userData', getLegacyUserDataPath(app.getPath('appData')));
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const formats = new Set(['mkv', 'mp4']);

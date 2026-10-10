@@ -25,7 +25,7 @@ npm start           # electron .
 
 ### 실제 앱 + CDP 검증 레시피
 ```bash
-# 별도 Windows 테스트 계정에서 실행한다 (고정 userData는 --user-data-dir로 격리되지 않는다)
+# 임시 --user-data-dir 를 주면 고정 userData 보다 우선한다(0.5.0부터 명시한 경우에만 존중)
 env -u ELECTRON_RUN_AS_NODE node_modules/electron/dist/electron.exe \
   --user-data-dir="<임시폴더>" --remote-debugging-port=9333 --remote-allow-origins='*' . &
 ```

@@ -11,16 +11,21 @@ test('legacy userData stays fixed before ready and supplies state and managed to
   const expected = path.join(appDataPath, 'YT Cut');
   assert.equal(getLegacyUserDataPath(appDataPath), expected);
   const source = readFileSync(new URL('../main.js', import.meta.url), 'utf8');
-  const statement = source.match(/^app\.setPath\('userData', getLegacyUserDataPath\(app\.getPath\('appData'\)\)\);$/m);
+  const statement = source.match(/^if \(!app\.commandLine\.hasSwitch\('user-data-dir'\)\) app\.setPath\('userData', getLegacyUserDataPath\(app\.getPath\('appData'\)\)\);$/m);
   assert.ok(statement);
   assert.ok(statement.index < source.indexOf("app.whenReady()"));
   assert.ok(statement.index < source.indexOf("app.getPath('userData')"));
   const calls = [];
-  runInNewContext(statement[0], { getLegacyUserDataPath, app: {
+  const makeApp = hasSwitch => ({
+    commandLine: { hasSwitch: name => name === 'user-data-dir' && hasSwitch },
     getPath(name) { assert.equal(name, 'appData'); return appDataPath; },
     setPath(name, value) { calls.push([name, value]); },
-  } });
+  });
+  runInNewContext(statement[0], { getLegacyUserDataPath, app: makeApp(false) });
   assert.deepEqual(calls, [['userData', expected]]);
+  // 검증용 --user-data-dir 가 있으면 고정하지 않는다.
+  runInNewContext(statement[0], { getLegacyUserDataPath, app: makeApp(true) });
+  assert.equal(calls.length, 1);
   assert.match(source, /mkdir\(app\.getPath\('userData'\)/);
   assert.match(source, /createStore\(path\.join\(app\.getPath\('userData'\), 'state\.json'\)\)/);
   assert.match(source, /managedPath: path\.join\(app\.getPath\('userData'\), 'bin', 'yt-dlp\.exe'\)/);
