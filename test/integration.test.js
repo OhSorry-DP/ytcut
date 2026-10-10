@@ -1320,7 +1320,7 @@ async function mainHarness(jobs, options = {}) {
   const source = (await fs.readFile('main.js', 'utf8')).split('async function initialize()')[0]
     .replace(/^import .*;\r?$/gm, '').replaceAll('import.meta.url', JSON.stringify(new URL('../main.js', import.meta.url).href));
   const context = vm.createContext({ path, fileURLToPath: url => new URL(url).pathname, URL, structuredClone,
-    app: { getPath: () => os.tmpdir(), setPath() {} }, getLegacyUserDataPath, AsyncLocalStorage, safeToolError, createYtdlpUpdater: () => ({}), createManagedTool: () => ({}), createFfmpegDescriptor: () => ({}), createRunner: () => options.runner || {}, createPreviewStream: () => options.preview || {}, updaterPkg: { autoUpdater: {} },
+    app: { commandLine: { hasSwitch: () => false }, getPath: () => os.tmpdir(), setPath() {} }, getLegacyUserDataPath, AsyncLocalStorage, safeToolError, createYtdlpUpdater: () => ({}), createManagedTool: () => ({}), createFfmpegDescriptor: () => ({}), createRunner: () => options.runner || {}, createPreviewStream: () => options.preview || {}, updaterPkg: { autoUpdater: {} },
     stat: fs.stat, mkdir: fs.mkdir, access: fs.access, constants, isDeepStrictEqual, normalizeYouTubeUrl, normalizeFileName, validateStateSnapshot,
     BrowserWindow: Window, Menu: { setApplicationMenu() {} }, ipcMain: { handle: (name, fn) => handlers.set(name, fn) },
     shell: { showItemInFolder: target => opened.push(['file', target]), openPath: async target => { opened.push(['folder', target]); return ''; } },
